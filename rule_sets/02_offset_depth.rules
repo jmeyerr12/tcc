@@ -1,0 +1,5 @@
+# Testa regras com offset e depth usando packetSize 80
+# Intervalos originais: 8-17 e 40-49
+# Offsets esperados depois da compactacao: 0 e 10
+alert tcp any any -> any any (msg:"depth janela 1"; content:"AAAA"; offset:8; depth:10; sid:100011; rev:1;)
+alert tcp any any -> any any (msg:"depth janela 2"; content:"BBBB"; offset:40; depth:10; sid:100012; rev:1;)

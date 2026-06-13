@@ -1,0 +1,5 @@
+# Testa regra sem offset: deve ser mantida como esta
+# Regras com offset devem ser ajustadas
+alert tcp any any -> any any (msg:"sem offset fica igual"; content:"POST"; nocase; sid:100021; rev:1;)
+alert tcp any any -> any any (msg:"offset vira 0"; content:"GET"; nocase; offset 20; sid:100022; rev:1;)
+alert tcp any any -> any any (msg:"offset vira 3"; content:"XYZ"; nocase; offset 50; sid:100023; rev:1;)

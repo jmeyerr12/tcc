@@ -1,0 +1,7 @@
+# Deve forcar mudanca de offsets com packetSize 60
+# Intervalos originais: 10-13, 30-33, 45-48
+# Cortes: 0-9, 14-29, 34-44, 49-59
+# Offsets esperados no arquivo adaptado: 0, 4, 8
+alert tcp any any -> any any (msg:"teste offset vira 0"; content:"ABCD"; offset 10; sid:100001; rev:1;)
+alert tcp any any -> any any (msg:"teste offset vira 4"; content:"WXYZ"; offset 30; sid:100002; rev:1;)
+alert tcp any any -> any any (msg:"teste offset vira 8"; content:"1234"; offset 45; sid:100003; rev:1;)

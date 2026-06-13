@@ -1,0 +1,6 @@
+# Testa intervalos sobrepostos/encostados, usando packetSize 70
+# 5-8, 7-10 viram bloco 5-10; 30-33 vira segundo bloco
+# Offsets esperados: 0, 2, 6
+alert tcp any any -> any any (msg:"overlap 1"; content:"AAAA"; offset 5; sid:100031; rev:1;)
+alert tcp any any -> any any (msg:"overlap 2"; content:"BBBB"; offset 7; sid:100032; rev:1;)
+alert tcp any any -> any any (msg:"bloco 2"; content:"CCCC"; offset 30; sid:100033; rev:1;)
