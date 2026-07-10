@@ -1,0 +1,12 @@
+Resumo da classificacao de regras Snort
+======================================
+
+Total de regras analisadas: 3917
+Incluidas: 3867
+Descartadas: 50
+Revisao manual: 0
+
+Categorias:
+- behavior_header: 3834
+- unsupported_payload_scan: 50
+- behavior_frequency,behavior_header: 33

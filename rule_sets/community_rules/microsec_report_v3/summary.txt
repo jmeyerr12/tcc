@@ -1,0 +1,16 @@
+Resumo da classificacao de regras Snort
+======================================
+
+Total de regras analisadas: 3917
+Incluidas: 643
+Comportamentais/cabecalho: 625
+Payload posicionado: 543
+Descartadas: 3274
+Revisao manual: 0
+
+Categorias:
+- unsupported_payload_scan: 3274
+- behavior_header,payload_positioned: 525
+- behavior_header: 97
+- payload_positioned: 18
+- behavior_frequency,behavior_header: 3
