@@ -1,0 +1,8 @@
+Resumo da separacao de regras
+============================
+
+Arquivo analisado: registered/registered_unified_by_classtype.rules
+Total de regras: 25005
+Regras sem content: 329
+Regras com content e offset: 1464
+Regras com content e depth: 3976

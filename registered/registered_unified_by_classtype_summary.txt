@@ -1,0 +1,41 @@
+Resumo da unificacao de regras Snort
+===================================
+
+Pasta analisada: registered/rules
+Arquivos .rules encontrados: 67
+Regras lidas: 25005
+Regras gravadas: 25005
+Duplicatas removidas por sid: 0
+Arquivo .rules gerado: registered/registered_unified_by_classtype.rules
+Relatorio CSV: registered/registered_unified_by_classtype.csv
+
+Contagem por classtype:
+- attempted-admin: 3446
+- attempted-dos: 869
+- attempted-recon: 831
+- attempted-user: 12413
+- bad-unknown: 72
+- default-login-attempt: 35
+- denial-of-service: 234
+- misc-activity: 1333
+- misc-attack: 325
+- network-scan: 13
+- non-standard-protocol: 37
+- not-suspicious: 1
+- policy-violation: 1041
+- protocol-command-decode: 678
+- rpc-portmap-decode: 123
+- sem_classtype: 1
+- shellcode-detect: 334
+- string-detect: 6
+- successful-admin: 11
+- successful-recon-limited: 195
+- successful-user: 5
+- suspicious-filename-detect: 22
+- suspicious-login: 26
+- system-call-detect: 5
+- trojan-activity: 1479
+- unknown: 2
+- unsuccessful-user: 11
+- web-application-activity: 545
+- web-application-attack: 912
