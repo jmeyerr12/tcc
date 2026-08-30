@@ -1,0 +1,11 @@
+
+identifica que regra nao usa payload e mantem/manter tudo que tem de header
+algoritmo deve descartar regras nao tratadas (se sobrar tempo, separar regras de header de aplicação e transporte)
+testar com conjunto de regras (jorge vai mandar cjto de regras do suricata) suricata update
+
+
+
+analisar pra ver qual o maior byte de offset pra cada cjto depois do reajuste (depois dos cortes, quantos bytes de payload sobrou)
+analisar numero de regras descartadas
+
+/var/lib/suricata/rules/suricata.rules

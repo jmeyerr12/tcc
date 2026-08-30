@@ -1,887 +1,1309 @@
 #include <iostream>
+#include <fstream>
+#include <string>
 #include <vector>
 #include <algorithm>
-#include <fstream>
 #include <regex>
-#include <optional>
-#include <cctype>
-#include <stdexcept>
-#include <string>
-#include <sstream>
+#include <map>
 #include <iomanip>
+#include <cctype>
+#include <climits>
 
 using namespace std;
 
+// data structures
+
 struct Interval {
-    int start;
-    int end;
+    long long start;
+    long long end;
 };
 
-enum class RuleAction {
+struct Token {
+    size_t start;
+    size_t end;
+    string text;
+    string key;
+};
+
+enum BufferKind {
+    RAW_PAYLOAD,
+    PACKET_HEADER,
+    APPLICATION_BUFFER
+};
+
+enum RuleAction {
     KEEP_HEADER,
-    KEEP_PAYLOAD,
-    EXCLUDE,
+    ADAPT_PAYLOAD,
+    EXCLUDE_RULE,
     NON_RULE
 };
 
-struct RuleDecision {
+struct ContentInfo {
+    BufferKind buffer;
+    bool hasOffset;
+    bool hasDepth;
+    bool hasDistance;
+    bool hasWithin;
+    bool startsWith;
+    long long offset;
+    long long depth;
+    long long distance;
+    long long within;
+    long long contentLength;
+    size_t offsetTokenIndex;
+
+    ContentInfo()
+        : buffer(RAW_PAYLOAD), hasOffset(false), hasDepth(false),
+          hasDistance(false), hasWithin(false), startsWith(false),
+          offset(0), depth(0), distance(0), within(0), contentLength(0),
+          offsetTokenIndex((size_t)-1) {}
+};
+
+struct SearchState {
+    long long minStart;
+    long long maxEnd;
+    long long contentLength;
+};
+
+struct ChainState {
+    Interval envelope;
+    SearchState previous;
+};
+
+struct RuleAnalysis {
     RuleAction action;
     string reason;
+    vector<Interval> intervals;
+    vector<size_t> rawOffsetTokens;
+
+    RuleAnalysis() : action(EXCLUDE_RULE), reason("nao_classificada") {}
+};
+
+struct RuleUsage {
+    bool networkTransportProtocol;
+    bool applicationProtocol;
+    bool networkTransportHeaderOnly;
+    bool applicationHeader;
+    bool applicationBuffer;
+    bool rawPayload;
+    bool otherNonHeaderSemantic;
+    vector<string> applicationHeaderBuffers;
+
+    RuleUsage()
+        : networkTransportProtocol(false), applicationProtocol(false),
+          networkTransportHeaderOnly(false), applicationHeader(false),
+          applicationBuffer(false), rawPayload(false),
+          otherNonHeaderSemantic(false) {}
 };
 
 struct Stats {
-    int totalRules = 0;
-    int keptHeader = 0;
-    int keptPayload = 0;
-    int excluded = 0;
-    int nonRules = 0;
+    long long totalRules;
+    long long keptHeader;
+    long long adaptedPayload;
+    long long excluded;
+    long long nonRules;
+
+    long long networkTransportHeaderRules;
+    long long networkTransportHeaderKept;
+    long long networkTransportHeaderExcluded;
+
+    long long applicationHeaderRules;
+    long long applicationHeaderKept;
+    long long applicationHeaderExcluded;
+
+    long long networkTransportPayloadRules;
+    long long networkTransportPayloadAdapted;
+    long long networkTransportPayloadExcluded;
+
+    long long otherApplicationRules;
+
+    map<string, long long> applicationHeaderBuffers;
+    map<string, long long> reasons;
+
+    Stats()
+        : totalRules(0), keptHeader(0), adaptedPayload(0),
+          excluded(0), nonRules(0),
+          networkTransportHeaderRules(0), networkTransportHeaderKept(0),
+          networkTransportHeaderExcluded(0),
+          applicationHeaderRules(0), applicationHeaderKept(0),
+          applicationHeaderExcluded(0),
+          networkTransportPayloadRules(0), networkTransportPayloadAdapted(0),
+          networkTransportPayloadExcluded(0), otherApplicationRules(0) {}
 };
 
-string trim(const string& s) {
-    size_t begin = s.find_first_not_of(" \t\r\n");
-    if (begin == string::npos) return "";
+struct PipelineData {
+    vector<string> lines;
+    vector<Interval> intervals;
+    vector<Interval> merged;
+    vector<Interval> cuts;
+    vector<Interval> adjusted;
+    Stats stats;
+};
 
-    size_t end = s.find_last_not_of(" \t\r\n");
-    return s.substr(begin, end - begin + 1);
+// parsing
+
+static string trim(const string& s) {
+    size_t first = s.find_first_not_of(" \t\r\n");
+    if (first == string::npos) return "";
+    size_t last = s.find_last_not_of(" \t\r\n");
+    return s.substr(first, last - first + 1);
 }
 
-string csvEscape(const string& value) {
+static string lowerCopy(string s) {
+    for (size_t i = 0; i < s.size(); ++i)
+        s[i] = (char)tolower((unsigned char)s[i]);
+    return s;
+}
+
+static bool startsWithText(const string& s, const string& prefix) {
+    return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
+}
+
+static string csvEscape(const string& s) {
     string out = "\"";
-
-    for (char c : value) {
-        if (c == '"') {
-            out += "\"\"";
-        } else {
-            out += c;
-        }
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '"') out += "\"\"";
+        else out += s[i];
     }
-
     out += "\"";
     return out;
 }
 
-// Separa a parte da regra e o comentario iniciado por # fora de aspas.
-pair<string, string> splitCodeAndComment(const string& line) {
-    bool insideQuotes = false;
-    bool escaped = false;
+// comments are recognized only when the trimmed line starts with '#'
+// this avoids breaking references that contain '#' inside urls
+static bool isCommentOrBlank(const string& line) {
+    string t = trim(line);
+    return t.empty() || t[0] == '#';
+}
 
-    for (size_t i = 0; i < line.size(); ++i) {
+static bool isRuleLine(const string& line) {
+    static const regex pattern(
+        "^\\s*(alert|log|pass|drop|reject|sdrop)\\b",
+        regex_constants::icase
+    );
+    return regex_search(line, pattern);
+}
+
+static string extractSid(const string& rule) {
+    static const regex pattern("\\bsid\\s*:\\s*(\\d+)", regex_constants::icase);
+    smatch match;
+    if (regex_search(rule, match, pattern)) return match[1];
+    return "";
+}
+
+static string getRuleProtocol(const string& rule) {
+    static const regex pattern(
+        "^\\s*(?:alert|log|pass|drop|reject|sdrop)\\s+([^\\s]+)",
+        regex_constants::icase
+    );
+    smatch match;
+    if (regex_search(rule, match, pattern)) return lowerCopy(match[1]);
+    return "";
+}
+
+static bool getOptionsBounds(const string& rule, size_t& openPos, size_t& closePos) {
+    openPos = rule.find('(');
+    closePos = rule.rfind(')');
+    return openPos != string::npos && closePos != string::npos && closePos > openPos;
+}
+
+static string optionKey(const string& text) {
+    string t = trim(text);
+    size_t i = 0;
+
+    while (i < t.size()) {
+        char c = t[i];
+        if (isalnum((unsigned char)c) || c == '_' || c == '.' || c == '-') ++i;
+        else break;
+    }
+
+    return lowerCopy(t.substr(0, i));
+}
+
+// options are split by ';' while quoted strings are preserved
+static vector<Token> tokenizeOptions(const string& options) {
+    vector<Token> tokens;
+    bool quoted = false;
+    bool escaped = false;
+    size_t start = 0;
+
+    for (size_t i = 0; i < options.size(); ++i) {
+        char c = options[i];
+
         if (escaped) {
             escaped = false;
             continue;
         }
 
-        if (line[i] == '\\') {
+        if (c == '\\') {
             escaped = true;
             continue;
         }
 
-        if (line[i] == '"') {
-            insideQuotes = !insideQuotes;
+        if (c == '"') {
+            quoted = !quoted;
+            continue;
         }
 
-        if (line[i] == '#' && !insideQuotes) {
-            return {line.substr(0, i), line.substr(i)};
+        if (c == ';' && !quoted) {
+            string text = options.substr(start, i - start);
+            if (!trim(text).empty()) {
+                Token token;
+                token.start = start;
+                token.end = i;
+                token.text = text;
+                token.key = optionKey(text);
+                tokens.push_back(token);
+            }
+            start = i + 1;
         }
     }
 
-    return {line, ""};
+    if (start < options.size()) {
+        string text = options.substr(start);
+        if (!trim(text).empty()) {
+            Token token;
+            token.start = start;
+            token.end = options.size();
+            token.text = text;
+            token.key = optionKey(text);
+            tokens.push_back(token);
+        }
+    }
+
+    return tokens;
 }
 
-bool isRuleLine(const string& line) {
-    static const regex rulePattern(R"REGEX(^\s*(alert|log|pass|drop|reject|sdrop)\b)REGEX",
-                                   regex_constants::icase);
-    return regex_search(line, rulePattern);
-}
-
-string extractSid(const string& rule) {
-    regex sidPattern(R"REGEX(\bsid\s*:?\s*(\d+))REGEX", regex_constants::icase);
+static bool parseIntegerOption(const Token& token, const string& name, long long& value) {
+    regex pattern("\\b" + name + "\\s*:\\s*(-?\\d+)", regex_constants::icase);
     smatch match;
 
-    if (regex_search(rule, match, sidPattern)) {
-        return match[1];
+    if (!regex_search(token.text, match, pattern)) return false;
+
+    try {
+        value = stoll(match[1]);
+    } catch (...) {
+        return false;
     }
 
-    return "";
+    return true;
 }
 
-optional<int> extractNumberOption(const string& text, const string& optionName) {
-    // Aceita: offset 0, offset:0, offset : 0, depth 10, depth:10 etc.
-    regex pattern("\\b" + optionName + "\\s*:?\\s*(-?\\d+)",
-                  regex_constants::icase);
+static long long encodedContentLength(const string& value) {
+    long long length = 0;
 
-    smatch match;
-    if (regex_search(text, match, pattern)) {
-        return stoi(match[1]);
-    }
+    for (size_t i = 0; i < value.size();) {
+        if (value[i] == '|') {
+            size_t end = value.find('|', i + 1);
 
-    return nullopt;
-}
-
-bool hasRegex(const string& text, const string& pattern) {
-    return regex_search(text, regex(pattern, regex_constants::icase));
-}
-
-string joinReasons(const vector<string>& items) {
-    string result;
-
-    for (size_t i = 0; i < items.size(); ++i) {
-        if (i > 0) result += "|";
-        result += items[i];
-    }
-
-    return result;
-}
-
-int getContentLength(const string& content) {
-    int length = 0;
-
-    for (size_t i = 0; i < content.size();) {
-        if (content[i] == '|') {
-            size_t endPipe = content.find('|', i + 1);
-
-            if (endPipe == string::npos) {
-                length++;
-                i++;
+            if (end == string::npos) {
+                ++length;
+                ++i;
                 continue;
             }
 
-            string hexPart = content.substr(i + 1, endPipe - i - 1);
+            string hex = value.substr(i + 1, end - i - 1);
+            string clean;
 
-            string cleanHex;
-            for (char c : hexPart) {
-                if (!isspace(static_cast<unsigned char>(c))) {
-                    cleanHex += c;
-                }
+            for (size_t j = 0; j < hex.size(); ++j) {
+                if (!isspace((unsigned char)hex[j])) clean += hex[j];
             }
 
-            // Cada par hexadecimal representa 1 byte.
-            length += static_cast<int>(cleanHex.size()) / 2;
-            i = endPipe + 1;
-        } else if (content[i] == '\\' && i + 1 < content.size()) {
-            // Trata escapes dentro da string, por exemplo \" ou \\.
-            length++;
+            length += (long long)clean.size() / 2;
+            i = end + 1;
+        } else if (value[i] == '\\' && i + 1 < value.size()) {
+            ++length;
             i += 2;
         } else {
-            length++;
-            i++;
+            ++length;
+            ++i;
         }
     }
 
     return length;
 }
 
-string getOptionsText(const string& rule) {
-    auto [codePart, ignoredComment] = splitCodeAndComment(rule);
-    (void) ignoredComment;
+static bool parseContentLength(const Token& token, long long& length) {
+    size_t first = token.text.find('"');
+    if (first == string::npos) return false;
 
-    size_t openParen = codePart.find('(');
-    size_t closeParen = codePart.rfind(')');
+    bool escaped = false;
+    size_t last = string::npos;
 
-    if (openParen == string::npos || closeParen == string::npos || closeParen <= openParen) {
-        return "";
-    }
+    for (size_t i = first + 1; i < token.text.size(); ++i) {
+        char c = token.text[i];
 
-    return codePart.substr(openParen + 1, closeParen - openParen - 1);
-}
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
 
-vector<pair<size_t, size_t>> getContentBlockRanges(const string& optionsText) {
-    vector<pair<size_t, size_t>> ranges;
+        if (c == '\\') {
+            escaped = true;
+            continue;
+        }
 
-    // Captura content:"..." e content:!"...", incluindo escapes simples dentro das aspas.
-    regex contentPattern(R"REGEX(\bcontent\s*:\s*!?\s*"((?:\\.|[^"\\])*)")REGEX",
-                         regex_constants::icase);
-
-    vector<size_t> starts;
-
-    auto begin = sregex_iterator(optionsText.begin(), optionsText.end(), contentPattern);
-    auto end = sregex_iterator();
-
-    for (auto it = begin; it != end; ++it) {
-        starts.push_back(static_cast<size_t>((*it).position()));
-    }
-
-    for (size_t i = 0; i < starts.size(); ++i) {
-        size_t blockEnd = (i + 1 < starts.size()) ? starts[i + 1] : optionsText.size();
-        ranges.push_back({starts[i], blockEnd});
-    }
-
-    return ranges;
-}
-
-bool hasContent(const string& optionsText) {
-    return hasRegex(optionsText, R"REGEX(\bcontent\s*:\s*!?\s*")REGEX");
-}
-
-vector<string> unsupportedPayloadOptions(const string& optionsText) {
-    vector<string> unsupported;
-
-    // Opcoes que a implementacao atual ainda nao adapta com seguranca.
-    // Elas podem depender de posicoes relativas, buffers normalizados,
-    // tamanho do payload ou operacoes de leitura dinamica.
-    vector<string> names = {
-        "distance",
-        "within",
-        "pcre",
-        "byte_test",
-        "byte_jump",
-        "byte_extract",
-        "byte_math",
-        "isdataat",
-        "dsize",
-        "stream_size",
-        "file_data",
-        "http_uri",
-        "http_raw_uri",
-        "http_header",
-        "http_raw_header",
-        "http_client_body",
-        "http_cookie",
-        "http_method",
-        "http_stat_code",
-        "http_stat_msg",
-        "http_param",
-        "http_true_ip",
-        "base64_decode",
-        "base64_data",
-        "js_data",
-        "vba_data",
-        "pkt_data",
-        "raw_data"
-    };
-
-    for (const string& name : names) {
-        regex pattern("\\b" + name + "\\b", regex_constants::icase);
-        if (regex_search(optionsText, pattern)) {
-            unsupported.push_back(name);
+        if (c == '"') {
+            last = i;
+            break;
         }
     }
 
-    return unsupported;
-}
+    if (last == string::npos) return false;
 
-bool allContentBlocksArePositioned(const string& optionsText, string& reason) {
-    auto ranges = getContentBlockRanges(optionsText);
-
-    if (ranges.empty()) {
-        reason = "sem_content";
-        return false;
-    }
-
-    for (const auto& range : ranges) {
-        string block = optionsText.substr(range.first, range.second - range.first);
-
-        auto offset = extractNumberOption(block, "offset");
-        auto depth = extractNumberOption(block, "depth");
-
-        if (!offset.has_value() && !depth.has_value()) {
-            reason = "content_sem_offset_ou_depth";
-            return false;
-        }
-    }
-
-    reason = "todos_contents_posicionados";
+    length = encodedContentLength(token.text.substr(first + 1, last - first - 1));
     return true;
 }
 
-RuleDecision classifyRule(const string& line) {
-    auto [codePartRaw, commentPart] = splitCodeAndComment(line);
-    (void) commentPart;
+// rule classification helpers
 
-    string codePart = trim(codePartRaw);
-
-    if (codePart.empty() || !isRuleLine(codePart)) {
-        return {RuleAction::NON_RULE, "nao_e_regra_ativa"};
-    }
-
-    string optionsText = getOptionsText(codePart);
-
-    if (optionsText.empty()) {
-        return {RuleAction::EXCLUDE, "regra_sem_bloco_de_opcoes"};
-    }
-
-    bool contentPresent = hasContent(optionsText);
-    vector<string> unsupported = unsupportedPayloadOptions(optionsText);
-
-    if (!contentPresent) {
-        if (unsupported.empty()) {
-            return {RuleAction::KEEP_HEADER, "regra_de_cabecalho_ou_comportamento_sem_payload"};
-        }
-
-        return {RuleAction::EXCLUDE, "sem_content_mas_com_opcao_payload_nao_tratada:" + joinReasons(unsupported)};
-    }
-
-    if (!unsupported.empty()) {
-        return {RuleAction::EXCLUDE, "content_com_opcao_nao_tratada:" + joinReasons(unsupported)};
-    }
-
-    string positionedReason;
-    if (!allContentBlocksArePositioned(optionsText, positionedReason)) {
-        return {RuleAction::EXCLUDE, positionedReason};
-    }
-
-    return {RuleAction::KEEP_PAYLOAD, "payload_tratado_por_offset_ou_depth"};
+static bool isNetworkTransportProtocol(const string& protocol) {
+    return protocol == "ip" || protocol == "tcp" || protocol == "udp" ||
+           protocol == "icmp" || protocol == "icmpv6" || protocol == "ipv6" ||
+           protocol == "sctp" || protocol == "tcp-pkt" || protocol == "pkthdr";
 }
 
-vector<Interval> extractIntervalsFromRule(const string& rule, int payloadSize) {
-    vector<Interval> intervals;
-
-    string optionsText = getOptionsText(rule);
-
-    if (optionsText.empty()) {
-        return intervals;
-    }
-
-    regex contentPattern(R"REGEX(\bcontent\s*:\s*!?\s*"((?:\\.|[^"\\])*)")REGEX",
-                         regex_constants::icase);
-
-    auto begin = sregex_iterator(optionsText.begin(), optionsText.end(), contentPattern);
-    auto end = sregex_iterator();
-
-    for (auto it = begin; it != end; ++it) {
-        smatch contentMatch = *it;
-
-        string contentValue = contentMatch[1];
-        (void) contentValue;
-        size_t contentStart = static_cast<size_t>(contentMatch.position());
-
-        size_t nextContent;
-        auto nextIt = it;
-        ++nextIt;
-
-        if (nextIt != end) {
-            nextContent = static_cast<size_t>((*nextIt).position());
-        } else {
-            nextContent = optionsText.size();
-        }
-
-        string contentBlock = optionsText.substr(contentStart, nextContent - contentStart);
-
-        auto offset = extractNumberOption(contentBlock, "offset");
-        auto depth = extractNumberOption(contentBlock, "depth");
-
-        if (!offset.has_value() && !depth.has_value()) {
-            continue;
-        }
-
-        int start = offset.value_or(0);
-        int endByte;
-
-        if (depth.has_value()) {
-            // content + depth:
-            // - sem offset: janela do inicio do payload ate depth - 1
-            // - com offset: janela de offset ate offset + depth - 1
-            endByte = start + depth.value() - 1;
-        } else {
-            // content + offset sem depth:
-            // criterio conservador: a busca pode seguir do offset ate o fim do payload.
-            endByte = payloadSize - 1;
-        }
-
-        if (start < 0) start = 0;
-        if (endByte >= payloadSize) endByte = payloadSize - 1;
-
-        if (start <= endByte) {
-            intervals.push_back({start, endByte});
-        }
-    }
-
-    return intervals;
+static bool isHeaderBuffer(const string& key) {
+    return key == "tcp.hdr" || key == "udp.hdr" ||
+           key == "ipv4.hdr" || key == "ipv6.hdr" ||
+           key == "icmpv4.hdr" || key == "icmpv6.hdr";
 }
 
-vector<string> readAllLines(const string& filename) {
-    ifstream file(filename);
-
-    if (!file.is_open()) {
-        throw runtime_error("Erro ao abrir o arquivo: " + filename);
-    }
-
-    vector<string> lines;
-    string line;
-
-    while (getline(file, line)) {
-        lines.push_back(line);
-    }
-
-    return lines;
+static bool isRawPayloadBuffer(const string& key) {
+    return key == "pkt_data" || key == "raw_data";
 }
 
-vector<Interval> readIntervalsFromSupportedRules(
-    const vector<string>& lines,
-    int payloadSize
+static bool isApplicationHeaderBuffer(const string& key) {
+    return key == "http.header" || key == "http.header.raw" ||
+           key == "http.header_names" || key == "http.request_header" ||
+           key == "http.response_header" || key == "http_header" ||
+           key == "http_raw_header";
+}
+
+static bool isApplicationBuffer(const string& key) {
+    if (key.empty()) return false;
+
+    const char* prefixes[] = {
+        "http.", "dns.", "tls.", "ssl.", "ssh.", "smtp.", "ftp.",
+        "smb.", "dcerpc.", "krb5.", "mqtt.", "modbus.", "pgsql.",
+        "rdp.", "snmp.", "sip.", "rfb.", "nfs.", "ike.", "quic."
+    };
+
+    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i) {
+        if (startsWithText(key, prefixes[i])) return true;
+    }
+
+    return key == "file.data" || key == "file_data" ||
+           key == "base64_data" || key == "js_data" || key == "vba_data" ||
+           key == "http_uri" || key == "http_raw_uri" ||
+           key == "http_header" || key == "http_raw_header" ||
+           key == "http_client_body" || key == "http_cookie" ||
+           key == "http_method" || key == "http_stat_code" ||
+           key == "http_stat_msg" || key == "uricontent";
+}
+
+// application headers are parsed from payload and are reported separately
+static bool getApplicationHeaderBuffers(
+    const string& rule,
+    vector<string>& buffers
 ) {
-    vector<Interval> intervals;
+    size_t openPos;
+    size_t closePos;
 
-    for (const string& line : lines) {
-        RuleDecision decision = classifyRule(line);
+    if (!getOptionsBounds(rule, openPos, closePos)) return false;
 
-        if (decision.action != RuleAction::KEEP_PAYLOAD) {
-            continue;
-        }
+    string options = rule.substr(openPos + 1, closePos - openPos - 1);
+    vector<Token> tokens = tokenizeOptions(options);
+    map<string, bool> seen;
 
-        vector<Interval> ruleIntervals = extractIntervalsFromRule(line, payloadSize);
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (!isApplicationHeaderBuffer(tokens[i].key)) continue;
+        if (seen[tokens[i].key]) continue;
 
-        intervals.insert(intervals.end(), ruleIntervals.begin(), ruleIntervals.end());
+        seen[tokens[i].key] = true;
+        buffers.push_back(tokens[i].key);
     }
 
-    return intervals;
+    return !buffers.empty();
 }
 
-vector<Interval> removeContained(vector<Interval> intervals) {
-    sort(intervals.begin(), intervals.end(),
-        [](const Interval& a, const Interval& b) {
-            if (a.start == b.start)
-                return a.end > b.end;
-            return a.start < b.start;
-        });
+static bool isPayloadOperation(const string& key) {
+    return key == "pcre" || key == "byte_test" || key == "byte_jump" ||
+           key == "byte_extract" || key == "byte_math" || key == "isdataat" ||
+           key == "asn1" || key == "rpc";
+}
 
-    vector<Interval> result;
+static bool isUnsupportedPayloadSemantic(const string& key) {
+    return key == "dsize" || key == "stream_size" || key == "stream-event" ||
+           key == "app-layer-event" || key == "app-layer-protocol";
+}
 
-    for (const auto& current : intervals) {
-        if (result.empty()) {
-            result.push_back(current);
+// rule usage is classified independently from the adaptation result
+static RuleUsage classifyRuleUsage(const string& rule) {
+    RuleUsage usage;
+    string protocol = getRuleProtocol(rule);
+
+    usage.networkTransportProtocol = isNetworkTransportProtocol(protocol);
+    usage.applicationProtocol = !protocol.empty() && !usage.networkTransportProtocol;
+
+    size_t openPos;
+    size_t closePos;
+
+    if (!getOptionsBounds(rule, openPos, closePos)) return usage;
+
+    string options = rule.substr(openPos + 1, closePos - openPos - 1);
+    vector<Token> tokens = tokenizeOptions(options);
+    BufferKind currentBuffer = RAW_PAYLOAD;
+    map<string, bool> seenApplicationHeaders;
+
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        const string& key = tokens[i].key;
+
+        if (isHeaderBuffer(key)) {
+            currentBuffer = PACKET_HEADER;
             continue;
         }
 
-        const auto& last = result.back();
-
-        if (current.start >= last.start && current.end <= last.end) {
+        if (isRawPayloadBuffer(key)) {
+            currentBuffer = RAW_PAYLOAD;
             continue;
         }
 
-        result.push_back(current);
+        if (isApplicationBuffer(key)) {
+            currentBuffer = APPLICATION_BUFFER;
+            usage.applicationBuffer = true;
+
+            if (isApplicationHeaderBuffer(key)) {
+                usage.applicationHeader = true;
+
+                if (!seenApplicationHeaders[key]) {
+                    seenApplicationHeaders[key] = true;
+                    usage.applicationHeaderBuffers.push_back(key);
+                }
+            }
+
+            continue;
+        }
+
+        if (key == "content" || isPayloadOperation(key)) {
+            if (currentBuffer == RAW_PAYLOAD) usage.rawPayload = true;
+            if (currentBuffer == APPLICATION_BUFFER) usage.applicationHeader =
+                usage.applicationHeader;
+            continue;
+        }
+
+        if (isUnsupportedPayloadSemantic(key)) {
+            usage.otherNonHeaderSemantic = true;
+        }
+    }
+
+    usage.networkTransportHeaderOnly =
+        usage.networkTransportProtocol &&
+        !usage.rawPayload &&
+        !usage.applicationBuffer &&
+        !usage.otherNonHeaderSemantic;
+
+    return usage;
+}
+
+static bool safeAdd(long long a, long long b, long long& out) {
+    if ((b > 0 && a > LLONG_MAX - b) ||
+        (b < 0 && a < LLONG_MIN - b)) {
+        return false;
+    }
+
+    out = a + b;
+    return true;
+}
+
+// algorithm logic
+
+// stage 1 analyzes one rule and extracts every finite payload interval
+static RuleAnalysis analyzeRule(
+    const string& line,
+    vector<Token>* tokensOut = NULL,
+    string* optionsOut = NULL
+) {
+    RuleAnalysis result;
+
+    if (isCommentOrBlank(line) || !isRuleLine(line)) {
+        result.action = NON_RULE;
+        result.reason = "nao_e_regra_ativa";
+        return result;
+    }
+
+    size_t openPos;
+    size_t closePos;
+
+    if (!getOptionsBounds(line, openPos, closePos)) {
+        result.action = EXCLUDE_RULE;
+        result.reason = "regra_sem_bloco_de_opcoes";
+        return result;
+    }
+
+    string protocol = getRuleProtocol(line);
+
+    if (!isNetworkTransportProtocol(protocol)) {
+        result.action = EXCLUDE_RULE;
+        result.reason = "protocolo_de_aplicacao_nao_tratado:" + protocol;
+        return result;
+    }
+
+    string options = line.substr(openPos + 1, closePos - openPos - 1);
+    vector<Token> tokens = tokenizeOptions(options);
+
+    if (tokensOut) *tokensOut = tokens;
+    if (optionsOut) *optionsOut = options;
+
+    BufferKind currentBuffer = RAW_PAYLOAD;
+    vector<ContentInfo> contents;
+    long long currentContent = -1;
+    bool anyHeaderInspection = false;
+
+    // first pass collects content constraints and rejects unsupported semantics
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        const string& key = tokens[i].key;
+
+        if (isHeaderBuffer(key)) {
+            currentBuffer = PACKET_HEADER;
+            currentContent = -1;
+            anyHeaderInspection = true;
+            continue;
+        }
+
+        if (isRawPayloadBuffer(key)) {
+            currentBuffer = RAW_PAYLOAD;
+            currentContent = -1;
+            continue;
+        }
+
+        if (isApplicationBuffer(key)) {
+            result.action = EXCLUDE_RULE;
+            result.reason = "buffer_de_aplicacao_nao_tratado:" + key;
+            return result;
+        }
+
+        if (isUnsupportedPayloadSemantic(key)) {
+            result.action = EXCLUDE_RULE;
+            result.reason = "semantica_nao_preservada:" + key;
+            return result;
+        }
+
+        if (key == "endswith") {
+            if (currentContent >= 0 &&
+                contents[(size_t)currentContent].buffer == PACKET_HEADER) {
+                anyHeaderInspection = true;
+                continue;
+            }
+
+            result.action = EXCLUDE_RULE;
+            result.reason = "modificador_de_fim_de_buffer_nao_tratado:endswith";
+            return result;
+        }
+
+        if (key == "content") {
+            ContentInfo content;
+            content.buffer = currentBuffer;
+
+            if (!parseContentLength(tokens[i], content.contentLength) ||
+                content.contentLength <= 0) {
+                result.action = EXCLUDE_RULE;
+                result.reason = "content_invalido_ou_vazio";
+                return result;
+            }
+
+            contents.push_back(content);
+            currentContent = (long long)contents.size() - 1;
+            continue;
+        }
+
+        if (key == "offset" || key == "depth" || key == "distance" ||
+            key == "within" || key == "startswith") {
+            if (currentContent < 0) {
+                result.action = EXCLUDE_RULE;
+                result.reason = "modificador_sem_content:" + key;
+                return result;
+            }
+
+            ContentInfo& content = contents[(size_t)currentContent];
+
+            if (key == "startswith") {
+                content.startsWith = true;
+                continue;
+            }
+
+            long long value;
+
+            if (!parseIntegerOption(tokens[i], key, value)) {
+                result.action = EXCLUDE_RULE;
+                result.reason = key + "_nao_numerico";
+                return result;
+            }
+
+            if (key == "offset") {
+                content.hasOffset = true;
+                content.offset = value;
+                content.offsetTokenIndex = i;
+            } else if (key == "depth") {
+                content.hasDepth = true;
+                content.depth = value;
+            } else if (key == "distance") {
+                content.hasDistance = true;
+                content.distance = value;
+            } else {
+                content.hasWithin = true;
+                content.within = value;
+            }
+
+            continue;
+        }
+
+        if (isPayloadOperation(key)) {
+            currentContent = -1;
+
+            if (currentBuffer != PACKET_HEADER) {
+                result.action = EXCLUDE_RULE;
+                result.reason = "operacao_de_payload_nao_tratada:" + key;
+                return result;
+            }
+
+            anyHeaderInspection = true;
+        }
+    }
+
+    vector<ChainState> chains;
+    long long lastRawContent = -1;
+    long long lastChain = -1;
+    bool anyRawPayload = false;
+
+    // second pass converts absolute and relative constraints into finite intervals
+    for (size_t i = 0; i < contents.size(); ++i) {
+        ContentInfo& content = contents[i];
+
+        if (content.buffer == PACKET_HEADER) {
+            anyHeaderInspection = true;
+            lastRawContent = -1;
+            lastChain = -1;
+            continue;
+        }
+
+        if (content.buffer != RAW_PAYLOAD) {
+            result.action = EXCLUDE_RULE;
+            result.reason = "content_em_buffer_nao_tratado";
+            return result;
+        }
+
+        anyRawPayload = true;
+
+        bool absolute = content.hasOffset || content.hasDepth || content.startsWith;
+        bool relative = content.hasDistance || content.hasWithin;
+
+        if (content.startsWith && (content.hasOffset || content.hasDepth || relative)) {
+            result.action = EXCLUDE_RULE;
+            result.reason = "startswith_com_modificador_incompativel";
+            return result;
+        }
+
+        if (absolute && relative) {
+            result.action = EXCLUDE_RULE;
+            result.reason = "mistura_modificador_absoluto_relativo";
+            return result;
+        }
+
+        if (content.hasOffset && content.offset < 0) {
+            result.action = EXCLUDE_RULE;
+            result.reason = "offset_negativo_nao_tratado";
+            return result;
+        }
+
+        if (content.hasDepth && content.depth <= 0) {
+            result.action = EXCLUDE_RULE;
+            result.reason = "depth_invalido";
+            return result;
+        }
+
+        if (content.hasWithin && content.within <= 0) {
+            result.action = EXCLUDE_RULE;
+            result.reason = "within_invalido";
+            return result;
+        }
+
+        // open searches are excluded because the algorithm only keeps finite intervals
+        if (absolute && content.hasOffset && !content.hasDepth && !content.startsWith) {
+            result.action = EXCLUDE_RULE;
+            result.reason = "offset_sem_depth_intervalo_aberto";
+            return result;
+        }
+
+        if (relative && !content.hasWithin) {
+            result.action = EXCLUDE_RULE;
+            result.reason = "distance_sem_within_intervalo_aberto";
+            return result;
+        }
+
+        if (!absolute && !relative) {
+            result.action = EXCLUDE_RULE;
+            result.reason = "content_sem_modificador_de_intervalo";
+            return result;
+        }
+
+        if (absolute) {
+            SearchState state;
+
+            if (content.startsWith) {
+                state.minStart = 0;
+                state.maxEnd = content.contentLength - 1;
+            } else {
+                state.minStart = content.hasOffset ? content.offset : 0;
+
+                if (!safeAdd(state.minStart, content.depth - 1, state.maxEnd)) {
+                    result.action = EXCLUDE_RULE;
+                    result.reason = "intervalo_excede_limite";
+                    return result;
+                }
+            }
+
+            state.contentLength = content.contentLength;
+
+            ChainState chain;
+            chain.envelope.start = state.minStart;
+            chain.envelope.end = state.maxEnd;
+            chain.previous = state;
+            chains.push_back(chain);
+
+            lastChain = (long long)chains.size() - 1;
+            lastRawContent = (long long)i;
+
+            if (content.hasOffset) {
+                result.rawOffsetTokens.push_back(content.offsetTokenIndex);
+            }
+
+            continue;
+        }
+
+        // relative windows stay unchanged and their full envelope is preserved
+        if (lastRawContent != (long long)i - 1 || lastChain < 0) {
+            result.action = EXCLUDE_RULE;
+            result.reason = "modificador_relativo_sem_content_anterior_compativel";
+            return result;
+        }
+
+        ChainState& chain = chains[(size_t)lastChain];
+        SearchState previous = chain.previous;
+        SearchState current;
+        long long distance = content.hasDistance ? content.distance : 0;
+        long long temporary;
+
+        if (!safeAdd(previous.minStart, previous.contentLength, temporary) ||
+            !safeAdd(temporary, distance, current.minStart)) {
+            result.action = EXCLUDE_RULE;
+            result.reason = "intervalo_relativo_excede_limite";
+            return result;
+        }
+
+        if (current.minStart < 0) current.minStart = 0;
+
+        if (!safeAdd(previous.maxEnd, distance, temporary) ||
+            !safeAdd(temporary, content.within, current.maxEnd)) {
+            result.action = EXCLUDE_RULE;
+            result.reason = "intervalo_relativo_excede_limite";
+            return result;
+        }
+
+        if (current.maxEnd < 0) current.maxEnd = 0;
+        current.contentLength = content.contentLength;
+
+        chain.envelope.start = min(chain.envelope.start, current.minStart);
+        chain.envelope.end = max(chain.envelope.end, current.maxEnd);
+        chain.previous = current;
+        lastRawContent = (long long)i;
+    }
+
+    for (size_t i = 0; i < chains.size(); ++i) {
+        result.intervals.push_back(chains[i].envelope);
+    }
+
+    if (anyRawPayload) {
+        result.action = ADAPT_PAYLOAD;
+        result.reason = "payload_com_intervalos_finitos_offset_depth_distance_within_startswith";
+    } else {
+        result.action = KEEP_HEADER;
+        result.reason = anyHeaderInspection ? "inspecao_de_header" : "independente_do_payload";
     }
 
     return result;
 }
 
-vector<Interval> mergeIntervals(vector<Interval> intervals) {
-    if (intervals.empty()) {
-        return {};
-    }
+// stage 2 merges overlapping or adjacent intervals
+static vector<Interval> mergeIntervals(vector<Interval> intervals) {
+    if (intervals.empty()) return intervals;
 
-    sort(intervals.begin(), intervals.end(),
-        [](const Interval& a, const Interval& b) {
-            if (a.start == b.start)
-                return a.end < b.end;
-            return a.start < b.start;
-        });
+    sort(intervals.begin(), intervals.end(), [](const Interval& a, const Interval& b) {
+        if (a.start != b.start) return a.start < b.start;
+        return a.end < b.end;
+    });
 
-    vector<Interval> result;
-    result.push_back(intervals[0]);
+    vector<Interval> merged;
+    merged.push_back(intervals[0]);
 
     for (size_t i = 1; i < intervals.size(); ++i) {
-        auto& last = result.back();
-        const auto& current = intervals[i];
+        Interval& last = merged.back();
+        const Interval& current = intervals[i];
 
-        // Usa <= para unir intervalos sobrepostos.
-        // Troque para current.start <= last.end + 1 se quiser juntar tambem os adjacentes.
-        if (current.start <= last.end) {
+        if (current.start <= last.end + 1) {
             last.end = max(last.end, current.end);
         } else {
-            result.push_back(current);
+            merged.push_back(current);
         }
     }
 
-    return result;
+    return merged;
 }
 
-vector<Interval> getCutRanges(const vector<Interval>& intervals, int payloadSize) {
+// stage 3 finds every removable gap before the last required byte
+static vector<Interval> getCuts(const vector<Interval>& merged) {
     vector<Interval> cuts;
+    if (merged.empty()) return cuts;
 
-    if (payloadSize <= 0) {
-        return cuts;
+    if (merged[0].start > 0) {
+        cuts.push_back(Interval{0, merged[0].start - 1});
     }
 
-    if (intervals.empty()) {
-        cuts.push_back({0, payloadSize - 1});
-        return cuts;
-    }
-
-    if (intervals[0].start > 0) {
-        cuts.push_back({0, intervals[0].start - 1});
-    }
-
-    for (size_t i = 0; i + 1 < intervals.size(); ++i) {
-        int start = intervals[i].end + 1;
-        int end = intervals[i + 1].start - 1;
+    for (size_t i = 0; i + 1 < merged.size(); ++i) {
+        long long start = merged[i].end + 1;
+        long long end = merged[i + 1].start - 1;
 
         if (start <= end) {
-            cuts.push_back({start, end});
+            cuts.push_back(Interval{start, end});
         }
-    }
-
-    if (intervals.back().end < payloadSize - 1) {
-        cuts.push_back({intervals.back().end + 1, payloadSize - 1});
     }
 
     return cuts;
 }
 
-int removedBeforePosition(int position, const vector<Interval>& cuts) {
-    int removed = 0;
+static long long intervalLength(const Interval& interval) {
+    return interval.end - interval.start + 1;
+}
 
-    for (const auto& cut : cuts) {
-        int cutSize = cut.end - cut.start + 1;
+static long long removedBefore(long long position, const vector<Interval>& cuts) {
+    long long removed = 0;
 
-        if (cut.end < position) {
-            removed += cutSize;
+    for (size_t i = 0; i < cuts.size(); ++i) {
+        if (cuts[i].end < position) {
+            removed += intervalLength(cuts[i]);
         }
     }
 
     return removed;
 }
 
-int adjustPosition(int originalPosition, const vector<Interval>& cuts) {
-    return originalPosition - removedBeforePosition(originalPosition, cuts);
+static long long adjustPosition(long long position, const vector<Interval>& cuts) {
+    return position - removedBefore(position, cuts);
 }
 
-vector<Interval> adjustIntervals(const vector<Interval>& merged, const vector<Interval>& cuts) {
+// stage 4 maps required intervals to their new positions after the cuts
+static vector<Interval> adjustIntervals(
+    const vector<Interval>& merged,
+    const vector<Interval>& cuts
+) {
     vector<Interval> adjusted;
 
-    for (const auto& interval : merged) {
-        int newStart = adjustPosition(interval.start, cuts);
-        int newEnd = adjustPosition(interval.end, cuts);
-
-        adjusted.push_back({newStart, newEnd});
+    for (size_t i = 0; i < merged.size(); ++i) {
+        adjusted.push_back(Interval{
+            adjustPosition(merged[i].start, cuts),
+            adjustPosition(merged[i].end, cuts)
+        });
     }
 
     return adjusted;
 }
 
-int totalIntervalBytes(const vector<Interval>& intervals) {
-    int total = 0;
+// rule adaptation
 
-    for (const auto& interval : intervals) {
-        if (interval.start <= interval.end) {
-            total += interval.end - interval.start + 1;
-        }
-    }
+static string replaceOffsetToken(const string& tokenText, long long newOffset) {
+    static const regex pattern(
+        "(\\boffset\\s*:\\s*)(-?\\d+)",
+        regex_constants::icase
+    );
 
-    return total;
+    smatch match;
+    if (!regex_search(tokenText, match, pattern)) return tokenText;
+
+    return match.prefix().str() + match[1].str() +
+           to_string(newOffset) + match.suffix().str();
 }
 
-int remainingPayloadBytesFromMerged(const vector<Interval>& merged) {
-    // Os intervalos merged representam exatamente os bytes do payload
-    // que precisam ser preservados para as regras suportadas.
-    return totalIntervalBytes(merged);
-}
+// only absolute raw payload offsets are rewritten
+// distance and within remain unchanged because their relative spacing is preserved
+static string adaptRule(const string& line, const vector<Interval>& cuts) {
+    vector<Token> tokens;
+    string options;
+    RuleAnalysis analysis = analyzeRule(line, &tokens, &options);
 
-double percentage(int part, int total) {
-    if (total <= 0) {
-        return 0.0;
-    }
-
-    return 100.0 * static_cast<double>(part) / static_cast<double>(total);
-}
-
-int lastPayloadByteAfterAdjustment(const vector<Interval>& adjusted) {
-    if (adjusted.empty()) {
-        return -1;
-    }
-
-    int last = -1;
-    for (const auto& interval : adjusted) {
-        last = max(last, interval.end);
-    }
-
-    return last;
-}
-
-// Substitui todos os offsets de um bloco de content pelo offset novo.
-// Mantem a formatacao original ao maximo: offset 5, offset:5, offset : 5 etc.
-string replaceOffsetsInContentBlock(const string& block, const vector<Interval>& cuts) {
-    regex offsetPattern(R"REGEX((\boffset\s*:?\s*)(-?\d+))REGEX",
-                        regex_constants::icase);
-
-    string result;
-    size_t lastPos = 0;
-
-    auto begin = sregex_iterator(block.begin(), block.end(), offsetPattern);
-    auto end = sregex_iterator();
-
-    for (auto it = begin; it != end; ++it) {
-        smatch match = *it;
-
-        size_t matchPos = static_cast<size_t>(match.position());
-        size_t matchLen = static_cast<size_t>(match.length());
-
-        string prefix = match[1];
-        int oldOffset = stoi(match[2]);
-        int newOffset = adjustPosition(oldOffset, cuts);
-
-        if (newOffset < 0) {
-            newOffset = 0;
-        }
-
-        result += block.substr(lastPos, matchPos - lastPos);
-        result += prefix;
-        result += to_string(newOffset);
-
-        lastPos = matchPos + matchLen;
-    }
-
-    result += block.substr(lastPos);
-    return result;
-}
-
-string adaptRuleLine(const string& line, const vector<Interval>& cuts) {
-    auto [codePart, commentPart] = splitCodeAndComment(line);
-
-    size_t openParen = codePart.find('(');
-    size_t closeParen = codePart.rfind(')');
-
-    if (openParen == string::npos || closeParen == string::npos || closeParen <= openParen) {
+    if (analysis.action != ADAPT_PAYLOAD || analysis.rawOffsetTokens.empty()) {
         return line;
     }
 
-    string beforeOptions = codePart.substr(0, openParen + 1);
-    string optionsText = codePart.substr(openParen + 1, closeParen - openParen - 1);
-    string afterOptions = codePart.substr(closeParen);
+    map<size_t, bool> shouldReplace;
 
-    regex contentPattern(R"REGEX(\bcontent\s*:\s*!?\s*"((?:\\.|[^"\\])*)")REGEX",
-                         regex_constants::icase);
+    for (size_t i = 0; i < analysis.rawOffsetTokens.size(); ++i) {
+        shouldReplace[analysis.rawOffsetTokens[i]] = true;
+    }
 
-    string adaptedOptions;
+    size_t openPos;
+    size_t closePos;
+    getOptionsBounds(line, openPos, closePos);
+
+    string newOptions;
     size_t cursor = 0;
 
-    auto begin = sregex_iterator(optionsText.begin(), optionsText.end(), contentPattern);
-    auto end = sregex_iterator();
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (!shouldReplace[i]) continue;
 
-    for (auto it = begin; it != end; ++it) {
-        smatch match = *it;
-        size_t contentStart = static_cast<size_t>(match.position());
+        newOptions += options.substr(cursor, tokens[i].start - cursor);
 
-        // Copia tudo antes deste content sem alterar.
-        adaptedOptions += optionsText.substr(cursor, contentStart - cursor);
+        long long oldOffset = 0;
+        parseIntegerOption(tokens[i], "offset", oldOffset);
+        long long newOffset = adjustPosition(oldOffset, cuts);
 
-        size_t nextContent;
-        auto nextIt = it;
-        ++nextIt;
-
-        if (nextIt != end) {
-            nextContent = static_cast<size_t>((*nextIt).position());
-        } else {
-            nextContent = optionsText.size();
-        }
-
-        string contentBlock = optionsText.substr(contentStart, nextContent - contentStart);
-        adaptedOptions += replaceOffsetsInContentBlock(contentBlock, cuts);
-
-        cursor = nextContent;
+        newOptions += replaceOffsetToken(tokens[i].text, newOffset);
+        cursor = tokens[i].end;
     }
 
-    adaptedOptions += optionsText.substr(cursor);
+    newOptions += options.substr(cursor);
 
-    return beforeOptions + adaptedOptions + afterOptions + commentPart;
+    return line.substr(0, openPos + 1) + newOptions + line.substr(closePos);
 }
 
-void writeExcludedReportHeader(ofstream& report) {
-    report << "line,sid,reason,rule\n";
+// pipeline input and output
+
+// stage 0 loads the complete rule file before any transformation
+static bool loadRules(const string& filename, vector<string>& lines) {
+    ifstream input(filename.c_str());
+    if (!input) return false;
+
+    string line;
+    while (getline(input, line)) {
+        lines.push_back(line);
+    }
+
+    return true;
 }
 
-void writeExcludedReportRow(
-    ofstream& report,
-    int lineNumber,
-    const string& line,
-    const string& reason
+// stage 1 scans supported rules and records their finite intervals
+static bool extractIntervals(
+    const vector<string>& lines,
+    vector<Interval>& intervals,
+    const string& reportName
 ) {
-    string sid = extractSid(line);
+    ofstream report(reportName.c_str());
+    if (!report) return false;
 
-    report << lineNumber << ",";
-    report << csvEscape(sid) << ",";
-    report << csvEscape(reason) << ",";
-    report << csvEscape(trim(line)) << "\n";
-}
-
-Stats writeAdaptedRulesFile(
-    const string& inputFilename,
-    const string& outputFilename,
-    const string& excludedReportFilename,
-    const vector<Interval>& cuts
-) {
-    vector<string> lines = readAllLines(inputFilename);
-    ofstream output(outputFilename);
-    ofstream excludedReport(excludedReportFilename);
-
-    if (!output.is_open()) {
-        throw runtime_error("Erro ao criar o arquivo de saida: " + outputFilename);
-    }
-
-    if (!excludedReport.is_open()) {
-        throw runtime_error("Erro ao criar o relatorio de excluidas: " + excludedReportFilename);
-    }
-
-    writeExcludedReportHeader(excludedReport);
-
-    Stats stats;
+    report << "line,sid,start,end,type,rule\n";
 
     for (size_t i = 0; i < lines.size(); ++i) {
-        const string& line = lines[i];
-        RuleDecision decision = classifyRule(line);
+        RuleAnalysis analysis = analyzeRule(lines[i]);
 
-        switch (decision.action) {
-            case RuleAction::NON_RULE:
-                stats.nonRules++;
-                // Mantem comentarios e linhas em branco para preservar contexto do arquivo.
-                output << line << "\n";
-                break;
+        if (analysis.action != ADAPT_PAYLOAD) continue;
 
-            case RuleAction::KEEP_HEADER:
-                stats.totalRules++;
-                stats.keptHeader++;
-                // Regras de cabecalho/comportamento sao mantidas sem alteracao,
-                // pois o MicroSec Traffic nao remove cabecalhos.
-                output << line << "\n";
-                break;
+        for (size_t j = 0; j < analysis.intervals.size(); ++j) {
+            intervals.push_back(analysis.intervals[j]);
 
-            case RuleAction::KEEP_PAYLOAD:
-                stats.totalRules++;
-                stats.keptPayload++;
-                output << adaptRuleLine(line, cuts) << "\n";
-                break;
-
-            case RuleAction::EXCLUDE:
-                stats.totalRules++;
-                stats.excluded++;
-                writeExcludedReportRow(excludedReport, static_cast<int>(i + 1), line, decision.reason);
-                break;
+            report << (i + 1) << ","
+                   << csvEscape(extractSid(lines[i])) << ","
+                   << analysis.intervals[j].start << ","
+                   << analysis.intervals[j].end << ","
+                   << csvEscape("finite") << ","
+                   << csvEscape(trim(lines[i])) << "\n";
         }
     }
 
-    return stats;
+    return true;
 }
 
-void printIntervals(const vector<Interval>& intervals) {
-    if (intervals.empty()) {
+// stage 5 writes supported rules and records every excluded rule
+static bool writeRules(
+    const vector<string>& lines,
+    const vector<Interval>& cuts,
+    const string& outputName,
+    const string& excludedName,
+    Stats& stats
+) {
+    ofstream output(outputName.c_str());
+    ofstream excluded(excludedName.c_str());
+
+    if (!output || !excluded) return false;
+
+    excluded << "line,sid,reason,rule\n";
+
+    for (size_t i = 0; i < lines.size(); ++i) {
+        RuleAnalysis analysis = analyzeRule(lines[i]);
+
+        if (analysis.action == NON_RULE) {
+            ++stats.nonRules;
+            output << lines[i] << "\n";
+            continue;
+        }
+
+        ++stats.totalRules;
+
+        RuleUsage usage = classifyRuleUsage(lines[i]);
+
+        if (usage.networkTransportHeaderOnly) {
+            ++stats.networkTransportHeaderRules;
+
+            if (analysis.action == KEEP_HEADER) {
+                ++stats.networkTransportHeaderKept;
+            } else {
+                ++stats.networkTransportHeaderExcluded;
+            }
+        } else if (usage.applicationHeader) {
+            ++stats.applicationHeaderRules;
+
+            for (size_t j = 0; j < usage.applicationHeaderBuffers.size(); ++j) {
+                ++stats.applicationHeaderBuffers[usage.applicationHeaderBuffers[j]];
+            }
+
+            if (analysis.action == ADAPT_PAYLOAD || analysis.action == KEEP_HEADER) {
+                ++stats.applicationHeaderKept;
+            } else {
+                ++stats.applicationHeaderExcluded;
+            }
+        } else if (usage.networkTransportProtocol) {
+            ++stats.networkTransportPayloadRules;
+
+            if (analysis.action == ADAPT_PAYLOAD) {
+                ++stats.networkTransportPayloadAdapted;
+            } else if (analysis.action == EXCLUDE_RULE) {
+                ++stats.networkTransportPayloadExcluded;
+            }
+        } else {
+            ++stats.otherApplicationRules;
+        }
+
+        if (analysis.action == KEEP_HEADER) {
+            ++stats.keptHeader;
+            output << lines[i] << "\n";
+            continue;
+        }
+
+        if (analysis.action == ADAPT_PAYLOAD) {
+            ++stats.adaptedPayload;
+            output << adaptRule(lines[i], cuts) << "\n";
+            continue;
+        }
+
+        ++stats.excluded;
+        ++stats.reasons[analysis.reason];
+
+        excluded << (i + 1) << ","
+                 << csvEscape(extractSid(lines[i])) << ","
+                 << csvEscape(analysis.reason) << ","
+                 << csvEscape(trim(lines[i])) << "\n";
+    }
+
+    return true;
+}
+
+static void printInterval(const Interval& interval) {
+    cout << interval.start << "-" << interval.end;
+}
+
+static void printSummary(
+    const PipelineData& data,
+    const string& outputName,
+    const string& excludedName,
+    const string& intervalsName
+) {
+    cout << "Resumo dos intervalos:\n";
+    cout << "Intervalos extraidos: " << data.intervals.size() << "\n";
+    cout << "Intervalos apos merge: " << data.merged.size() << "\n";
+
+    cout << "\nMerged:\n";
+    if (data.merged.empty()) {
         cout << "(nenhum)\n";
-        return;
+    } else {
+        for (size_t i = 0; i < data.merged.size(); ++i) {
+            printInterval(data.merged[i]);
+            cout << "\n";
+        }
     }
 
-    for (const auto& i : intervals) {
-        cout << i.start << "-" << i.end << "\n";
+    cout << "\nCortes finitos:\n";
+    if (data.cuts.empty()) {
+        cout << "(nenhum)\n";
+    } else {
+        for (size_t i = 0; i < data.cuts.size(); ++i) {
+            printInterval(data.cuts[i]);
+            cout << "\n";
+        }
     }
+
+    cout << "\nAdjusted:\n";
+    if (data.adjusted.empty()) {
+        cout << "(nenhum)\n";
+    } else {
+        for (size_t i = 0; i < data.adjusted.size(); ++i) {
+            printInterval(data.adjusted[i]);
+            cout << "\n";
+        }
+    }
+
+    cout << "\nResumo do payload:\n";
+
+    if (data.merged.empty()) {
+        cout << "Nenhuma regra adaptada exige bytes do payload.\n";
+    } else {
+        long long preservedBytes = 0;
+        long long removedBytes = 0;
+
+        for (size_t i = 0; i < data.merged.size(); ++i) {
+            preservedBytes += intervalLength(data.merged[i]);
+        }
+
+        for (size_t i = 0; i < data.cuts.size(); ++i) {
+            removedBytes += intervalLength(data.cuts[i]);
+        }
+
+        long long maxByte = data.merged.back().end;
+
+        cout << "Maior indice original de payload necessario: " << maxByte << "\n";
+        cout << "Bytes preservados apos compactacao: " << preservedBytes << " bytes\n";
+        cout << "Bytes removiveis nas lacunas ate o maior byte necessario: "
+             << removedBytes << " bytes\n";
+        cout << "Todos os bytes apos o indice " << maxByte
+             << " tambem podem ser removidos.\n";
+        cout << "Maior indice no payload reajustado: " << (preservedBytes - 1) << "\n";
+    }
+
+    double supportedPct = data.stats.totalRules
+        ? 100.0 * (data.stats.keptHeader + data.stats.adaptedPayload) / data.stats.totalRules
+        : 0.0;
+
+    double discardPct = data.stats.totalRules
+        ? 100.0 * data.stats.excluded / data.stats.totalRules
+        : 0.0;
+
+    cout << "\nResumo das regras:\n";
+    cout << "Regras analisadas: " << data.stats.totalRules << "\n";
+    cout << "Mantidas sem alteracao (header/independentes do payload): "
+         << data.stats.keptHeader << "\n";
+    cout << "Adaptadas (offset/depth/distance/within/startswith): "
+         << data.stats.adaptedPayload << "\n";
+    cout << "Excluidas (nao tratadas): " << data.stats.excluded << "\n";
+
+    cout << fixed << setprecision(2);
+
+    cout << "\nSeparacao por tipo de dado inspecionado:\n";
+    cout << "Regras de rede/transporte sem dependencia do payload: "
+         << data.stats.networkTransportHeaderRules << "\n";
+    cout << "  Mantidas sem alteracao: "
+         << data.stats.networkTransportHeaderKept << "\n";
+    cout << "  Excluidas: "
+         << data.stats.networkTransportHeaderExcluded << "\n";
+
+    cout << "Regras que inspecionam header de aplicacao: "
+         << data.stats.applicationHeaderRules << "\n";
+    cout << "  Tratadas pela implementacao atual: "
+         << data.stats.applicationHeaderKept << "\n";
+    cout << "  Excluidas: "
+         << data.stats.applicationHeaderExcluded << "\n";
+
+    cout << "Regras de payload sob protocolo de rede/transporte: "
+         << data.stats.networkTransportPayloadRules << "\n";
+    cout << "  Adaptadas por intervalos finitos: "
+         << data.stats.networkTransportPayloadAdapted << "\n";
+    cout << "  Excluidas: "
+         << data.stats.networkTransportPayloadExcluded << "\n";
+
+    cout << "Outras regras de aplicacao: "
+         << data.stats.otherApplicationRules << "\n";
+
+    cout << "\nBuffers de header de aplicacao encontrados:\n";
+    if (data.stats.applicationHeaderBuffers.empty()) {
+        cout << "  (nenhum)\n";
+    } else {
+        for (map<string, long long>::const_iterator it =
+                 data.stats.applicationHeaderBuffers.begin();
+             it != data.stats.applicationHeaderBuffers.end(); ++it) {
+            cout << "  " << it->first << ": " << it->second << "\n";
+        }
+    }
+
+    cout << fixed << setprecision(2);
+    cout << "Regras suportadas: "
+         << (data.stats.keptHeader + data.stats.adaptedPayload)
+         << " (" << supportedPct << "%)\n";
+    cout << "Taxa de descarte: " << discardPct << "%\n";
+
+    cout << "\nMotivos de descarte:\n";
+    for (map<string, long long>::const_iterator it = data.stats.reasons.begin();
+         it != data.stats.reasons.end(); ++it) {
+        cout << it->first << ": " << it->second << "\n";
+    }
+
+    cout << "\nArquivo adaptado: " << outputName << "\n";
+    cout << "Relatorio de excluidas: " << excludedName << "\n";
+    cout << "Relatorio dos intervalos: " << intervalsName << "\n";
 }
 
-void printUsage(const char* programName) {
-    cout << "Uso:\n";
-    cout << programName << " regras.rules tamanho_payload saida.rules [relatorio_excluidas.csv]\n\n";
-    cout << "Exemplo:\n";
-    cout << programName << " regras.rules 1500 regras-adaptadas.rules regras-excluidas.csv\n";
+// pipeline
+
+static int runPipeline(int argc, char* argv[]) {
+    if (argc < 3 || argc > 4) {
+        cout << "Uso:\n";
+        cout << argv[0] << " regras.rules saida.rules [relatorio_excluidas.csv]\n\n";
+        cout << "Exemplo:\n";
+        cout << argv[0]
+             << " suricata.rules suricata-adapted.rules suricata-excluded.csv\n";
+        return 1;
+    }
+
+    string inputName = argv[1];
+    string outputName = argv[2];
+    string excludedName = argc == 4 ? argv[3] : outputName + ".excluded.csv";
+    string intervalsName = outputName + ".intervals.csv";
+
+    PipelineData data;
+
+    // stage 0: read rules
+    if (!loadRules(inputName, data.lines)) {
+        cerr << "Erro ao abrir " << inputName << "\n";
+        return 1;
+    }
+
+    // stage 1: parse rules and extract finite intervals
+    if (!extractIntervals(data.lines, data.intervals, intervalsName)) {
+        cerr << "Erro ao criar relatorio de intervalos.\n";
+        return 1;
+    }
+
+    // stage 2: merge required intervals
+    data.merged = mergeIntervals(data.intervals);
+
+    // stage 3: calculate removable gaps
+    data.cuts = getCuts(data.merged);
+
+    // stage 4: calculate positions after packet washing
+    data.adjusted = adjustIntervals(data.merged, data.cuts);
+
+    // stage 5: adapt supported rules and discard unsupported rules
+    if (!writeRules(data.lines, data.cuts, outputName, excludedName, data.stats)) {
+        cerr << "Erro ao criar arquivos de saida.\n";
+        return 1;
+    }
+
+    // stage 6: print experiment metrics
+    printSummary(data, outputName, excludedName, intervalsName);
+
+    return 0;
 }
 
 int main(int argc, char* argv[]) {
-    if (argc < 4) {
-        printUsage(argv[0]);
-        return 1;
-    }
-
-    string inputFilename = argv[1];
-    int payloadSize = 0;
-    string outputFilename = argv[3];
-    string excludedReportFilename;
-
     try {
-        size_t parsedChars = 0;
-        payloadSize = stoi(argv[2], &parsedChars);
-
-        if (parsedChars != string(argv[2]).size()) {
-            throw invalid_argument("caracteres extras");
-        }
-    } catch (const exception&) {
-        cerr << "Erro: tamanho_payload deve ser um numero inteiro valido.\n";
+        return runPipeline(argc, argv);
+    } catch (const exception& error) {
+        cerr << "Erro: " << error.what() << "\n";
         return 1;
     }
-
-    if (argc >= 5) {
-        excludedReportFilename = argv[4];
-    } else {
-        excludedReportFilename = outputFilename + ".excluded.csv";
-    }
-
-    if (payloadSize <= 0) {
-        cerr << "Erro: tamanho_payload precisa ser maior que zero.\n";
-        return 1;
-    }
-
-    try {
-        vector<string> lines = readAllLines(inputFilename);
-        vector<Interval> intervals = readIntervalsFromSupportedRules(lines, payloadSize);
-
-        auto noContained = removeContained(intervals);
-        auto merged = mergeIntervals(noContained);
-        auto cuts = getCutRanges(merged, payloadSize);
-        auto adjusted = adjustIntervals(merged, cuts);
-
-        Stats stats = writeAdaptedRulesFile(inputFilename, outputFilename, excludedReportFilename, cuts);
-
-        cout << "Intervals from supported Snort rules:\n";
-        printIntervals(intervals);
-
-        cout << "\nMerged:\n";
-        printIntervals(merged);
-
-        cout << "\nCuts:\n";
-        printIntervals(cuts);
-
-        cout << "\nAdjusted:\n";
-        printIntervals(adjusted);
-
-        // Metrica principal: soma dos intervalos que precisam ser preservados.
-        int remainingPayloadBytes = remainingPayloadBytesFromMerged(merged);
-        int removedPayloadBytes = payloadSize - remainingPayloadBytes;
-        int lastPayloadByte = lastPayloadByteAfterAdjustment(adjusted);
-
-        if (removedPayloadBytes < 0) {
-            removedPayloadBytes = 0;
-        }
-
-        double payloadReduction = percentage(removedPayloadBytes, payloadSize);
-
-        // Como os intervalos sao compactados apos os cortes, quando ha payload
-        // preservado o maior indice reajustado + 1 deve ser igual ao total de bytes.
-        bool payloadSizeConsistent =
-            (remainingPayloadBytes == 0 && lastPayloadByte == -1) ||
-            (remainingPayloadBytes > 0 && lastPayloadByte + 1 == remainingPayloadBytes);
-
-        cout << fixed << setprecision(2);
-
-        cout << "\nResumo do payload apos cortes:\n";
-        cout << "Tamanho original do payload considerado: " << payloadSize << " bytes\n";
-        cout << "Bytes preservados do payload: " << remainingPayloadBytes << " bytes\n";
-        cout << "Bytes removidos do payload: " << removedPayloadBytes << " bytes\n";
-        cout << "Reducao do payload: " << payloadReduction << "%\n";
-
-        if (lastPayloadByte >= 0) {
-            cout << "Maior indice de byte no payload reajustado: " << lastPayloadByte << "\n";
-        } else {
-            cout << "Maior indice de byte no payload reajustado: nenhum payload preservado\n";
-        }
-
-        cout << "Verificacao tamanho x maior indice: "
-             << (payloadSizeConsistent ? "OK" : "INCONSISTENTE") << "\n";
-
-        int supportedRules = stats.keptHeader + stats.keptPayload;
-        double supportedPercentage = percentage(supportedRules, stats.totalRules);
-        double excludedPercentage = percentage(stats.excluded, stats.totalRules);
-
-        cout << "\nResumo das regras:\n";
-        cout << "Regras analisadas: " << stats.totalRules << "\n";
-        cout << "Mantidas sem alteracao (independentes do payload): " << stats.keptHeader << "\n";
-        cout << "Adaptadas (payload tratado por offset/depth): " << stats.keptPayload << "\n";
-        cout << "Excluidas (nao tratadas): " << stats.excluded << "\n";
-        cout << "Regras suportadas: " << supportedRules << " (" << supportedPercentage << "%)\n";
-        cout << "Taxa de descarte: " << excludedPercentage << "%\n";
-
-        cout << "\nArquivo de regras adaptado gerado em:\n";
-        cout << outputFilename << "\n";
-
-        cout << "\nRelatorio de regras excluidas gerado em:\n";
-        cout << excludedReportFilename << "\n";
-    } catch (const exception& e) {
-        cerr << e.what() << "\n";
-        return 1;
-    }
-
-    return 0;
 }
