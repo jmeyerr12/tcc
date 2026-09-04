@@ -1,0 +1,15 @@
+remover regras de offset com from sem to e esse tipo de coisa
+
+debugar algoritmo
+
+encontrar regras originais das regras adaptadas que trabalham com ipv6 e ipv4  
+encontrar regras originais das regras adaptadas que trabalham com tcp e udp 
+encontrar regras originais das regras adaptadas que trabalham com camada de aplicação
+
+pegar esses tres grupos e mandar algoritmo processar pra gerar regras adaptadas
+
+
+mandar email das regras 
+tres arquivos pra cada conjunto - originais, cortadas e instruções de corte (intervalos)
+depois de mandar, fulber vai falar pra eu falar com o rafa pra lidar com o cortador de pacotes - um cortador pra cada conjunto de regras
+depois analise teorica, depois testes empiricos pra medir em cada um o throughput, ... (reunião pra decidir métricas)
