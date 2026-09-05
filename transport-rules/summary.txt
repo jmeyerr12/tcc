@@ -1,0 +1,27 @@
+Resumo dos intervalos:
+Intervalos extraidos: 78
+Intervalos apos merge: 2
+
+Merged:
+0-313
+500-1363
+
+Cortes finitos:
+314-499
+
+Adjusted:
+0-313
+314-1177
+
+Resumo do payload:
+Maior indice original de payload necessario: 1363
+Bytes preservados apos compactacao: 1178 bytes
+Bytes removiveis nas lacunas ate o maior byte necessario: 186 bytes
+Todos os bytes apos o indice 1363 tambem podem ser removidos.
+Maior indice no payload reajustado: 1177
+
+Resumo das regras:
+Regras analisadas: 1005
+Mantidas sem alteracao (header/independentes do payload): 938
+Adaptadas (offset/depth/distance/within): 67
+Excluidas (nao tratadas): 0
