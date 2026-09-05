@@ -14,7 +14,25 @@ using namespace std;
 static bool isNetworkTransportProtocol(const string& protocol) {
     return protocol == "ip" || protocol == "tcp" || protocol == "udp" ||
            protocol == "icmp" || protocol == "icmpv6" || protocol == "ipv6" ||
-           protocol == "sctp" || protocol == "tcp-pkt" || protocol == "pkthdr";
+           protocol == "sctp" || protocol == "tcp-pkt" || protocol == "tcp-stream" ||
+           protocol == "pkthdr";
+}
+
+static bool isApplicationProtocol(const string& protocol) {
+    return protocol == "http" || protocol == "http1" || protocol == "http2" ||
+           protocol == "dns" || protocol == "tls" || protocol == "ssl" ||
+           protocol == "smtp" || protocol == "ftp" || protocol == "ftp-data" ||
+           protocol == "ssh" || protocol == "smb" || protocol == "dcerpc" ||
+           protocol == "krb5" || protocol == "mqtt" || protocol == "modbus" ||
+           protocol == "pgsql" || protocol == "rdp" || protocol == "snmp" ||
+           protocol == "sip" || protocol == "rfb" || protocol == "nfs" ||
+           protocol == "ike" || protocol == "quic" || protocol == "ntp" ||
+           protocol == "dhcp" || protocol == "telnet" ||
+           protocol == "bittorrent-dht";
+}
+
+static bool isSupportedProtocol(const string& protocol) {
+    return isNetworkTransportProtocol(protocol) || isApplicationProtocol(protocol);
 }
 
 static bool isHeaderBuffer(const string& key) {
@@ -29,9 +47,12 @@ static bool isRawPayloadBuffer(const string& key) {
 
 static bool isApplicationBuffer(const string& key) {
     const char* prefixes[] = {
-        "http.", "dns.", "tls.", "ssl.", "ssh.", "smtp.", "ftp.",
-        "smb.", "dcerpc.", "krb5.", "mqtt.", "modbus.", "pgsql.",
-        "rdp.", "snmp.", "sip.", "rfb.", "nfs.", "ike.", "quic."
+        "http.", "http_", "dns.", "dns_", "tls.", "tls_", "ssl.", "ssl_",
+        "ssh.", "ssh_", "smtp.", "smtp_", "ftp.", "ftp_", "smb.", "smb_",
+        "dcerpc.", "dcerpc_", "krb5.", "krb5_", "mqtt.", "mqtt_",
+        "modbus.", "modbus_", "pgsql.", "pgsql_", "rdp.", "rdp_",
+        "snmp.", "snmp_", "sip.", "sip_", "rfb.", "rfb_", "nfs.", "nfs_",
+        "ike.", "ike_", "quic.", "quic_"
     };
 
     for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i) {
@@ -85,10 +106,13 @@ RuleAnalysis analyzeRule(const string& line) {
         return result;
     }
 
-    if (!isNetworkTransportProtocol(getRuleProtocol(line))) {
+    string protocol = getRuleProtocol(line);
+
+    if (!isSupportedProtocol(protocol)) {
         return result;
     }
 
+    bool applicationProtocol = isApplicationProtocol(protocol);
     string options = line.substr(openPos + 1, closePos - openPos - 1);
     vector<Token> tokens = tokenizeOptions(options);
     vector<ContentInfo> contents;
@@ -211,9 +235,8 @@ RuleAnalysis analyzeRule(const string& line) {
         if (content.hasDepth && content.depth <= 0) return result;
         if (content.hasWithin && content.within <= 0) return result;
 
-        // absolute payload searches require both offset and depth
+        // absolute searches require both offset and depth
         if (content.hasOffset != content.hasDepth) return result;
-
         if (relative && !content.hasWithin) return result;
         if (!absolute && !relative) return result;
 
@@ -277,6 +300,11 @@ RuleAnalysis analyzeRule(const string& line) {
 
     for (size_t i = 0; i < chains.size(); ++i) {
         result.intervals.push_back(chains[i].envelope);
+    }
+
+    // application protocols are kept only when a finite raw payload interval is adapted
+    if (applicationProtocol && !usesPayload) {
+        return RuleAnalysis();
     }
 
     result.action = usesPayload ? ADAPT_RULE : KEEP_RULE;
