@@ -1,81 +1,27 @@
 Resumo dos intervalos:
-Intervalos extraidos: 397
-Intervalos apos merge: 1
+Intervalos extraidos: 82
+Intervalos apos merge: 2
 
 Merged:
-0-1999
+0-313
+500-1363
 
 Cortes finitos:
-(nenhum)
+314-499
 
 Adjusted:
-0-1999
+0-313
+314-1177
 
 Resumo do payload:
-Maior indice original de payload necessario: 1999
-Bytes preservados apos compactacao: 2000 bytes
-Bytes removiveis nas lacunas ate o maior byte necessario: 0 bytes
-Todos os bytes apos o indice 1999 tambem podem ser removidos.
-Maior indice no payload reajustado: 1999
+Maior indice original de payload necessario: 1363
+Bytes preservados apos compactacao: 1178 bytes
+Bytes removiveis nas lacunas ate o maior byte necessario: 186 bytes
+Todos os bytes apos o indice 1363 tambem podem ser removidos.
+Maior indice no payload reajustado: 1177
 
 Resumo das regras:
 Regras analisadas: 52508
 Mantidas sem alteracao (header/independentes do payload): 1465
-Adaptadas (offset/depth/distance/within/startswith): 370
-Excluidas (nao tratadas): 50673
-Regras suportadas: 1835 (3.49%)
-Taxa de descarte: 96.51%
-
-Motivos de descarte:
-buffer_de_aplicacao_nao_tratado:base64_data: 1
-buffer_de_aplicacao_nao_tratado:file.data: 25
-buffer_de_aplicacao_nao_tratado:http.cookie: 1
-buffer_de_aplicacao_nao_tratado:http.method: 1
-buffer_de_aplicacao_nao_tratado:http.request_line: 1
-buffer_de_aplicacao_nao_tratado:http.response_line: 1
-buffer_de_aplicacao_nao_tratado:tls.cert_issuer: 1
-content_sem_modificador_de_intervalo: 801
-distance_sem_within_intervalo_aberto: 700
-modificador_de_fim_de_buffer_nao_tratado:endswith: 53
-modificador_relativo_sem_content_anterior_compativel: 2
-offset_sem_depth_intervalo_aberto: 45
-operacao_de_payload_nao_tratada:byte_extract: 7
-operacao_de_payload_nao_tratada:byte_jump: 99
-operacao_de_payload_nao_tratada:byte_math: 4
-operacao_de_payload_nao_tratada:byte_test: 295
-operacao_de_payload_nao_tratada:isdataat: 82
-operacao_de_payload_nao_tratada:pcre: 590
-protocolo_de_aplicacao_nao_tratado:bittorrent-dht: 1
-protocolo_de_aplicacao_nao_tratado:dcerpc: 1
-protocolo_de_aplicacao_nao_tratado:dhcp: 2
-protocolo_de_aplicacao_nao_tratado:dns: 13631
-protocolo_de_aplicacao_nao_tratado:ftp: 66
-protocolo_de_aplicacao_nao_tratado:ftp-data: 3
-protocolo_de_aplicacao_nao_tratado:http: 22277
-protocolo_de_aplicacao_nao_tratado:http1: 1062
-protocolo_de_aplicacao_nao_tratado:http2: 20
-protocolo_de_aplicacao_nao_tratado:ike: 15
-protocolo_de_aplicacao_nao_tratado:krb5: 2
-protocolo_de_aplicacao_nao_tratado:mqtt: 12
-protocolo_de_aplicacao_nao_tratado:nfs: 3
-protocolo_de_aplicacao_nao_tratado:ntp: 2
-protocolo_de_aplicacao_nao_tratado:quic: 3
-protocolo_de_aplicacao_nao_tratado:rdp: 118
-protocolo_de_aplicacao_nao_tratado:rfb: 4
-protocolo_de_aplicacao_nao_tratado:sip: 1
-protocolo_de_aplicacao_nao_tratado:smb: 67
-protocolo_de_aplicacao_nao_tratado:smtp: 163
-protocolo_de_aplicacao_nao_tratado:snmp: 1
-protocolo_de_aplicacao_nao_tratado:ssh: 19
-protocolo_de_aplicacao_nao_tratado:tcp-stream: 1
-protocolo_de_aplicacao_nao_tratado:telnet: 1
-protocolo_de_aplicacao_nao_tratado:tls: 9532
-semantica_nao_preservada:app-layer-event: 6
-semantica_nao_preservada:app-layer-protocol: 10
-semantica_nao_preservada:dsize: 709
-semantica_nao_preservada:stream-event: 58
-semantica_nao_preservada:stream_size: 174
-
-Arquivo adaptado: suricata-adapted.rules
-Relatorio de excluidas: suricata-excluded.csv
-Relatorio dos intervalos: suricata-adapted.rules.intervals.csv
+Adaptadas (offset/depth/distance/within): 71
+Excluidas (nao tratadas): 50972

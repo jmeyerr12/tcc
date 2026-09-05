@@ -1,6 +1,6 @@
-remover regras de offset com from sem to e esse tipo de coisa
+remover regras de offset com from sem to e esse tipo de coisa - feito
 
-debugar algoritmo
+debugar algoritmo - feito (era que ele tava puxando linhas comentadas)
 
 encontrar regras originais das regras adaptadas que trabalham com ipv6 e ipv4  
 encontrar regras originais das regras adaptadas que trabalham com tcp e udp 

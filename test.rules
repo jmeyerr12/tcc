@@ -1,3 +1,0 @@
-alert tcp any any -> any any (msg:"SEPARADO A"; content:"abc"; offset:10; depth:5; sid:3000001; rev:1;)
-alert tcp any any -> any any (msg:"SEPARADO B"; content:"abc"; offset:50; depth:10; sid:3000002; rev:1;)
-alert tcp any any -> any any (msg:"SEPARADO C"; content:"abc"; offset:90; depth:5; sid:3000003; rev:1;)
