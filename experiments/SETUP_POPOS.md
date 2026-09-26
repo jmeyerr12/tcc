@@ -3,20 +3,26 @@
 Este guia prepara uma instalação nova do Pop!_OS para comparar o Suricata sem
 o cortador (baseline) e com o cortador XDP.
 
-## 1. Transferir a versão atual do projeto
+## 1. Clonar o projeto e transferir o PCAP
 
-O diretório atual contém mudanças e arquivos de experimento que ainda não
-estão todos no repositório remoto. Portanto, não use apenas `git clone` para
-montar a máquina nova. Copie o diretório atual, incluindo o PCAP.
+Os scripts e relatórios estão versionados na branch `experiments`. No notebook
+Ryzen, clone essa branch:
 
-No notebook Ryzen, instale e inicie o SSH:
+```bash
+mkdir -p /home/meyer/d
+cd /home/meyer/d
+git clone --branch experiments --single-branch \
+  https://github.com/jmeyerr12/tcc.git
+```
+
+Os PCAPs e resultados são ignorados pelo Git devido ao tamanho. Para transferir
+o PCAP pela rede local, instale e inicie o SSH no Ryzen:
 
 ```bash
 sudo apt update
 sudo apt install -y openssh-server rsync
 sudo systemctl enable --now ssh
 hostname -I
-mkdir -p /home/meyer/d/tcc
 ```
 
 No notebook Intel, substitua o endereço abaixo pelo IP do Ryzen:
@@ -24,14 +30,12 @@ No notebook Intel, substitua o endereço abaixo pelo IP do Ryzen:
 ```bash
 RYZEN_IP=192.168.0.100
 
-rsync -a --info=progress2 \
-  --exclude 'experiments/results/' \
-  /home/meyer/d/tcc/ \
-  meyer@"${RYZEN_IP}":/home/meyer/d/tcc/
+scp /home/meyer/d/tcc/experiments/pcaps/CICIDS2017-Monday-mtu1500.pcap \
+  meyer@"${RYZEN_IP}":/home/meyer/d/tcc/experiments/pcaps/
 ```
 
 Se o usuário ou o caminho forem diferentes no Ryzen, ajuste o destino do
-`rsync` e use esse mesmo caminho nos comandos seguintes.
+`scp` e use esse mesmo caminho nos comandos seguintes.
 
 ## 2. Instalar as dependências
 

@@ -1,4 +1,8 @@
 a.out
 *.
-experiments/pcaps/
+
+# Artefatos locais dos experimentos. Os scripts e relatorios em experiments/
+# permanecem versionados.
 experiments/results/
+experiments/pcaps/*
+!experiments/pcaps/README.md
