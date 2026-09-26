@@ -137,7 +137,7 @@ vector<Token> tokenizeOptions(const string& options) {
 }
 
 bool parseIntegerOption(const Token& token, const string& name, long long& value) {
-    regex pattern("\\b" + name + "\\s*:\\s*(-?\\d+)", regex_constants::icase);
+    regex pattern("^\\s*" + name + "\\s*:\\s*(-?\\d+)\\s*$", regex_constants::icase);
     smatch match;
 
     if (!regex_search(token.text, match, pattern)) return false;

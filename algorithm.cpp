@@ -142,6 +142,10 @@ RuleAnalysis analyzeRule(const string& line) {
         if (key == "content") {
             ContentInfo content;
             content.buffer = currentBuffer;
+            size_t colon = tokens[i].text.find(':');
+            if (colon == string::npos) return result;
+            string value = trim(tokens[i].text.substr(colon + 1));
+            content.negated = !value.empty() && value[0] == '!';
 
             if (!parseContentLength(tokens[i], content.contentLength) ||
                 content.contentLength <= 0) {
@@ -214,6 +218,7 @@ RuleAnalysis analyzeRule(const string& line) {
     long long lastRawContent = -1;
     long long lastChain = -1;
     bool usesPayload = false;
+    bool positivePayload = false;
 
     // convert supported content constraints into finite intervals
     for (size_t i = 0; i < contents.size(); ++i) {
@@ -226,6 +231,7 @@ RuleAnalysis analyzeRule(const string& line) {
         }
 
         usesPayload = true;
+        if (!content.negated) positivePayload = true;
 
         bool absolute = content.hasOffset || content.hasDepth;
         bool relative = content.hasDistance || content.hasWithin;
@@ -244,7 +250,8 @@ RuleAnalysis analyzeRule(const string& line) {
             SearchState state;
             state.minStart = content.hasOffset ? content.offset : 0;
 
-            if (!safeAdd(state.minStart, content.depth - 1, state.maxEnd)) {
+            if (!safeAdd(state.minStart, content.depth - 1, state.maxEnd) ||
+                state.maxEnd == LLONG_MAX) {
                 return result;
             }
 
@@ -254,6 +261,17 @@ RuleAnalysis analyzeRule(const string& line) {
             chain.envelope.start = state.minStart;
             chain.envelope.end = state.maxEnd;
             chain.previous = state;
+            // a negated match does not advance the inspection cursor.
+            if (content.negated) {
+                if (lastChain >= 0) {
+                    const ChainState& previous = chains[(size_t)lastChain];
+                    chain.previous = previous.previous;
+                    chain.envelope.start = min(chain.envelope.start, previous.envelope.start);
+                    chain.envelope.end = max(chain.envelope.end, previous.envelope.end);
+                } else {
+                    chain.previous = SearchState{0, -1, 0};
+                }
+            }
             chains.push_back(chain);
 
             lastChain = (long long)chains.size() - 1;
@@ -273,6 +291,7 @@ RuleAnalysis analyzeRule(const string& line) {
 
         ChainState& chain = chains[(size_t)lastChain];
         SearchState previous = chain.previous;
+        if (previous.maxEnd < 0) chain.envelope.start = 0;
         SearchState current;
         long long distance = content.hasDistance ? content.distance : 0;
         long long temporary;
@@ -282,10 +301,16 @@ RuleAnalysis analyzeRule(const string& line) {
             return result;
         }
 
+        // a negative search end can wrap to the full buffer in suricata.
+        if (!safeAdd(current.minStart, content.within, temporary) || temporary < 0) {
+            return result;
+        }
+
         if (current.minStart < 0) current.minStart = 0;
 
         if (!safeAdd(previous.maxEnd, distance, temporary) ||
-            !safeAdd(temporary, content.within, current.maxEnd)) {
+            !safeAdd(temporary, content.within, current.maxEnd) ||
+            current.maxEnd == LLONG_MAX) {
             return result;
         }
 
@@ -294,13 +319,15 @@ RuleAnalysis analyzeRule(const string& line) {
 
         chain.envelope.start = min(chain.envelope.start, current.minStart);
         chain.envelope.end = max(chain.envelope.end, current.maxEnd);
-        chain.previous = current;
+        if (!content.negated) chain.previous = current;
         lastRawContent = (long long)i;
     }
 
     for (size_t i = 0; i < chains.size(); ++i) {
         result.intervals.push_back(chains[i].envelope);
     }
+    // negated-only inspection still requires a nonempty packet payload.
+    if (usesPayload && !positivePayload) result.intervals.push_back(Interval{0, 0});
 
     // application protocols are kept only when a finite raw payload interval is adapted
     if (applicationProtocol && !usesPayload) {
@@ -326,7 +353,8 @@ vector<Interval> mergeIntervals(vector<Interval> intervals) {
         Interval& last = merged.back();
         const Interval& current = intervals[i];
 
-        if (current.start <= last.end + 1) {
+        if (current.start <= last.end ||
+            (last.end < LLONG_MAX && current.start == last.end + 1)) {
             last.end = max(last.end, current.end);
         } else {
             merged.push_back(current);

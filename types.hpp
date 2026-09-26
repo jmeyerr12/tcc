@@ -31,6 +31,7 @@ enum RuleAction {
 
 struct ContentInfo {
     BufferKind buffer;
+    bool negated;
     bool hasOffset;
     bool hasDepth;
     bool hasDistance;
@@ -43,7 +44,7 @@ struct ContentInfo {
     std::size_t offsetTokenIndex;
 
     ContentInfo()
-        : buffer(RAW_PAYLOAD), hasOffset(false), hasDepth(false),
+        : buffer(RAW_PAYLOAD), negated(false), hasOffset(false), hasDepth(false),
           hasDistance(false), hasWithin(false), offset(0), depth(0),
           distance(0), within(0), contentLength(0),
           offsetTokenIndex((std::size_t)-1) {}

@@ -6,7 +6,13 @@ Este arquivo registra as decisoes atuais de escopo da implementacao.
 
 O algoritmo mantem regras de rede/transporte que nao dependem do payload e adapta buscas no payload bruto quando a regiao de busca pode ser delimitada por intervalos finitos suportados.
 
-Regras cujo protocolo no header e de aplicacao, como `http`, `dns`, `tls`, `ssh` e `smb`, tambem podem ser analisadas. Elas so sao adaptadas quando o `content` atua sobre o payload bruto e usa um intervalo finito suportado.
+Os intervalos sao sempre calculados sobre o payload do pacote. Opcoes de
+`flow`, incluindo `only_stream` e `no_stream`, e os protocolos `tcp-pkt` e
+`tcp-stream` nao alteram a base usada no calculo.
+
+Regras cujo protocolo no header e de aplicacao, como `http`, `dns`, `tls`,
+`ssh` e `smb`, tambem podem ser analisadas. Elas so sao adaptadas quando o
+`content` atua sobre o payload bruto e usa um intervalo finito suportado.
 
 Buffers especificos de aplicacao, como `http.response_body`, `http.header`, `dns.query`, `tls.certs` e `file.data`, continuam fora do escopo porque seus offsets pertencem a buffers construidos ou normalizados pelo parser do IDS, e nao diretamente ao payload bruto.
 
@@ -66,7 +72,15 @@ Atualmente, para payload bruto:
 - `content` sem limite: descartado
 - `endswith`: descartado
 
-As mesmas regras de intervalo sao usadas quando o protocolo declarado no header e de aplicacao, desde que nenhum sticky buffer ou buffer especifico de aplicacao esteja ativo.
+As mesmas regras de intervalo sao usadas quando o protocolo declarado no
+header e de aplicacao, desde que nenhum sticky buffer ou buffer especifico de
+aplicacao esteja ativo.
+
+Conteudos negados nao avancam o cursor das buscas relativas. Para regras so
+com conteudos negados no payload, preserva-se tambem o byte 0, evitando que
+um payload curto nao vazio deixe de ser inspecionado apos o corte. Janelas
+relativas cujo fim pode ficar negativo sao descartadas: o Suricata pode
+sofrer wrap e pesquisar ate o fim do buffer, fora do modelo finito.
 
 ## observacao sobre protocolos de aplicacao
 
@@ -76,7 +90,8 @@ Uma regra como:
 alert http ... (content:"abc"; offset:100; depth:20; ...)
 ```
 
-pode entrar no tratamento atual porque o intervalo e calculado sobre o payload bruto.
+pode entrar no tratamento atual porque o intervalo e calculado sobre o payload
+bruto do pacote.
 
 Uma regra como:
 
