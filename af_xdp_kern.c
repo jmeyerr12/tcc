@@ -10,6 +10,10 @@
 
 #define MAX_INTERVALS 16
 #define MAX_PAYLOAD_BYTES 2048
+#define BLOCK_BYTES 256
+#define MAX_SUM_BYTES (MAX_PAYLOAD_BYTES + 60)
+#define MAX_SUM_BLOCKS ((MAX_SUM_BYTES + BLOCK_BYTES - 1) / BLOCK_BYTES)
+#define MAX_COPY_BLOCKS ((MAX_PAYLOAD_BYTES + BLOCK_BYTES - 1) / BLOCK_BYTES)
 
 struct interval {
     __u32 start;
@@ -41,28 +45,60 @@ struct sum_ctx {
     int error;
 };
 
-/* Soma em ordem de rede, incluindo o byte impar final. */
-static long sum_word(__u32 i, void *opaque)
+/* Soma em ordem de rede. O bloco e zerado antes da leitura, portanto os bytes
+ * de padding do ultimo bloco nao alteram o checksum. bpf_csum_diff processa o
+ * bloco inteiro no kernel e evita dezenas de instrucoes BPF por callback.
+ */
+static long sum_block(__u32 i, void *opaque)
 {
     struct sum_ctx *s = opaque;
-    __u8 bytes[2] = {};
-    __u32 pos = i * 2;
-    if (pos >= s->length) return 1;
-    if (load(s->xdp, s->offset + pos, bytes,
-             pos + 1 < s->length ? 2 : 1) < 0) {
+    __u8 bytes[BLOCK_BYTES] = {};
+    __u32 pos;
+    __u32 size;
+
+    /* O verifier analisa o callback separadamente e precisa deste limite
+     * explicito antes de aceitar length - pos como tamanho de helper. O AND
+     * tambem descarta os bits superiores desconhecidos do registrador que o
+     * Clang reutiliza para o argumento __u32 do callback.
+     */
+    i &= 63;
+    if (i >= MAX_SUM_BLOCKS) {
         s->error = 1;
         return 1;
     }
-    s->sum += ((__u32)bytes[0] << 8) | bytes[1];
+    pos = i * BLOCK_BYTES;
+    if (pos >= s->length) return 1;
+    size = s->length - pos;
+    if (size > BLOCK_BYTES) size = BLOCK_BYTES;
+    /* Mantem 1..64 inalterado e torna o limite assinado evidente ao verifier. */
+    asm volatile("" : "+r"(size));
+    size &= (BLOCK_BYTES * 2 - 1);
+    if (!size || size > BLOCK_BYTES) {
+        s->error = 1;
+        return 1;
+    }
+    if (load(s->xdp, s->offset + pos, bytes, size) < 0) {
+        s->error = 1;
+        return 1;
+    }
+
+    __s64 result = bpf_csum_diff(0, 0, (__be32 *)bytes,
+                                 sizeof(bytes), s->sum);
+    if (result < 0) {
+        s->error = 1;
+        return 1;
+    }
+    s->sum = (__u32)result;
     return 0;
 }
 
 static __always_inline int packet_sum(struct xdp_md *ctx, __u32 offset,
                                       __u32 length, __u32 *sum)
 {
-    if (length > MAX_PAYLOAD_BYTES + 60) return -1;
+    if (length > MAX_SUM_BYTES) return -1;
     struct sum_ctx s = { .xdp = ctx, .offset = offset, .length = length, .sum = *sum };
-    if (loop((length + 1) / 2, sum_word, &s, 0) < 0 || s.error) return -1;
+    if (loop((length + BLOCK_BYTES - 1) / BLOCK_BYTES,
+             sum_block, &s, 0) < 0 || s.error) return -1;
     *sum = s.sum;
     return 0;
 }
@@ -76,19 +112,54 @@ static __always_inline __u16 fold(__u32 sum)
 
 struct copy_ctx {
     struct xdp_md *xdp;
-    __u32 src, dst;
+    __u32 src, dst, length;
     int error;
 };
 
-static long copy_byte(__u32 i, void *opaque)
+static long copy_block(__u32 i, void *opaque)
 {
     struct copy_ctx *c = opaque;
-    __u8 byte;
-    if (load(c->xdp, c->src + i, &byte, 1) < 0 ||
-        store(c->xdp, c->dst + i, &byte, 1) < 0) {
+    __u8 bytes[BLOCK_BYTES] = {};
+    __u32 pos;
+    __u32 size;
+
+    i &= 63;
+    if (i >= MAX_COPY_BLOCKS) {
         c->error = 1;
         return 1;
     }
+    pos = i * BLOCK_BYTES;
+    if (pos >= c->length) return 1;
+    size = c->length - pos;
+    if (size > BLOCK_BYTES) size = BLOCK_BYTES;
+    asm volatile("" : "+r"(size));
+    size &= (BLOCK_BYTES * 2 - 1);
+    if (!size || size > BLOCK_BYTES) {
+        c->error = 1;
+        return 1;
+    }
+    if (load(c->xdp, c->src + pos, bytes, size) < 0 ||
+        store(c->xdp, c->dst + pos, bytes, size) < 0) {
+        c->error = 1;
+        return 1;
+    }
+    return 0;
+}
+
+static __always_inline int copy_bytes(struct xdp_md *ctx, __u32 src,
+                                      __u32 dst, __u32 length)
+{
+    if (!length || src == dst) return 0;
+    if (length > MAX_PAYLOAD_BYTES) return -1;
+    struct copy_ctx copy = {
+        .xdp = ctx,
+        .src = src,
+        .dst = dst,
+        .length = length,
+    };
+    if (loop((length + BLOCK_BYTES - 1) / BLOCK_BYTES,
+             copy_block, &copy, 0) < 0 || copy.error)
+        return -1;
     return 0;
 }
 
@@ -127,12 +198,10 @@ static long copy_interval(__u32 j, void *opaque)
     if (end < start || compact->written > start) goto error;
     __u32 size = end - start + 1;
     if (size > MAX_PAYLOAD_BYTES) goto error;
-    struct copy_ctx c = {
-        .xdp = compact->xdp,
-        .src = compact->offset + start,
-        .dst = compact->offset + compact->written,
-    };
-    if (loop(size, copy_byte, &c, 0) < 0 || c.error) goto error;
+    /* O primeiro intervalo normalmente ja esta no destino correto. */
+    if (copy_bytes(compact->xdp, compact->offset + start,
+                   compact->offset + compact->written, size) < 0)
+        goto error;
     compact->written += size;
     return 0;
 error:
@@ -146,6 +215,40 @@ static __always_inline int compact_payload(struct xdp_md *ctx, __u32 offset,
     struct compact_ctx compact = { .xdp = ctx, .offset = offset, .length = length };
     if (loop(count, copy_interval, &compact, 0) < 0 || compact.error) return -1;
     return compact.written;
+}
+
+static __always_inline int append_range(struct xdp_md *ctx, __u32 offset,
+                                        __u32 length, struct interval range,
+                                        __u32 written)
+{
+    __u32 start = range.start;
+    __u32 end = range.end;
+
+    if (start >= length) return written;
+    if (end >= length) end = length - 1;
+    if (end < start || written > start) return -1;
+    __u32 size = end - start + 1;
+    if (size > MAX_PAYLOAD_BYTES) return -1;
+    if (copy_bytes(ctx, offset + start, offset + written, size) < 0) return -1;
+    return written + size;
+}
+
+/* Evita os loops externos e consultas duplicadas ao mapa nos casos usados
+ * pelos experimentos: um intervalo (aplicacao/rede) ou dois (transporte).
+ */
+static __always_inline int compact_single(struct xdp_md *ctx, __u32 offset,
+                                          __u32 length, struct interval range)
+{
+    return append_range(ctx, offset, length, range, 0);
+}
+
+static __always_inline int compact_pair(struct xdp_md *ctx, __u32 offset,
+                                        __u32 length, struct interval first,
+                                        struct interval second)
+{
+    int written = append_range(ctx, offset, length, first, 0);
+    if (written < 0) return -1;
+    return append_range(ctx, offset, length, second, (__u32)written);
 }
 
 SEC("xdp")
@@ -166,9 +269,28 @@ int xdp_ids_func(struct xdp_md *ctx)
      * Use bpf_loop tambem nos intervalos: dois for convencionais em sequencia
      * multiplicavam os caminhos examinados pelo verifier (8193 jumps).
      */
-    struct interval_check_ctx check = {};
-    if (loop(count, check_interval, &check, 0) < 0 || check.error)
-        return XDP_ABORTED;
+    struct interval first_range = {};
+    struct interval second_range = {};
+    if (count <= 2) {
+        struct interval *range = bpf_map_lookup_elem(&intervals_map, &zero);
+        if (!range || range->end < range->start ||
+            range->end >= MAX_PAYLOAD_BYTES)
+            return XDP_ABORTED;
+        first_range = *range;
+        if (count == 2) {
+            __u32 one = 1;
+            range = bpf_map_lookup_elem(&intervals_map, &one);
+            if (!range || range->end < range->start ||
+                range->end >= MAX_PAYLOAD_BYTES ||
+                range->start <= first_range.end)
+                return XDP_ABORTED;
+            second_range = *range;
+        }
+    } else {
+        struct interval_check_ctx check = {};
+        if (loop(count, check_interval, &check, 0) < 0 || check.error)
+            return XDP_ABORTED;
+    }
 
     __u32 frame_len = ctx->data_end - ctx->data;
     struct ethhdr eth;
@@ -179,7 +301,8 @@ int xdp_ids_func(struct xdp_md *ctx)
     if (type != ETH_P_IP && type != ETH_P_IPV6)
         return XDP_PASS;
 
-    __u32 iphlen, iplen, protocol, pseudo = 0;
+    __u32 iphlen, iplen, protocol;
+    __be32 pseudo_words[10] = {};
     if (type == ETH_P_IP) {
         struct iphdr ip;
         if (load(ctx, ipoff, &ip, sizeof(ip)) < 0 || ip.version != 4 || ip.ihl < 5)
@@ -189,8 +312,8 @@ int xdp_ids_func(struct xdp_md *ctx)
         if (iplen < iphlen || (bpf_ntohs(ip.frag_off) & 0x3fff))
             return XDP_PASS;
         protocol = ip.protocol;
-        __u32 src = bpf_ntohl(ip.saddr), dst = bpf_ntohl(ip.daddr);
-        pseudo = (src >> 16) + (src & 0xffff) + (dst >> 16) + (dst & 0xffff);
+        pseudo_words[0] = ip.saddr;
+        pseudo_words[1] = ip.daddr;
     } else {
         struct ipv6hdr ip;
         if (load(ctx, ipoff, &ip, sizeof(ip)) < 0 || ip.version != 6)
@@ -203,9 +326,9 @@ int xdp_ids_func(struct xdp_md *ctx)
             protocol == 51 || protocol == 60 || protocol == 135 || protocol == 139 || protocol == 140)
             return XDP_PASS;
         #pragma clang loop unroll(full)
-        for (int i = 0; i < 8; ++i) {
-            pseudo += bpf_ntohs(ip.saddr.s6_addr16[i]);
-            pseudo += bpf_ntohs(ip.daddr.s6_addr16[i]);
+        for (int i = 0; i < 4; ++i) {
+            pseudo_words[i] = ip.saddr.s6_addr32[i];
+            pseudo_words[4 + i] = ip.daddr.s6_addr32[i];
         }
     }
     if (ipoff + iplen > frame_len)
@@ -232,7 +355,14 @@ int xdp_ids_func(struct xdp_md *ctx)
     if (l4len < l4hlen || l4len - l4hlen > MAX_PAYLOAD_BYTES)
         return XDP_PASS;
     __u32 payloadlen = l4len - l4hlen;
-    int kept = compact_payload(ctx, l4off + l4hlen, payloadlen, count);
+    int kept;
+    if (count == 1)
+        kept = compact_single(ctx, l4off + l4hlen, payloadlen, first_range);
+    else if (count == 2)
+        kept = compact_pair(ctx, l4off + l4hlen, payloadlen,
+                            first_range, second_range);
+    else
+        kept = compact_payload(ctx, l4off + l4hlen, payloadlen, count);
     if (kept < 0 || (__u32)kept > payloadlen)
         return XDP_ABORTED;
     /* Sem corte, preserve inclusive checksums originais invalidos e padding. */
@@ -250,7 +380,8 @@ int xdp_ids_func(struct xdp_md *ctx)
         if (store(ctx, ipoff + 10, &value, 2) < 0) return XDP_ABORTED;
         __u32 sum = 0;
         if (packet_sum(ctx, ipoff, iphlen, &sum) < 0) return XDP_ABORTED;
-        value = bpf_htons(fold(sum));
+        /* bpf_csum_diff e fold produzem __sum16 pronto para ser armazenado. */
+        value = fold(sum);
         if (store(ctx, ipoff + 10, &value, 2) < 0) return XDP_ABORTED;
     } else {
         value = bpf_htons((__u16)newl4len);
@@ -262,11 +393,21 @@ int xdp_ids_func(struct xdp_md *ctx)
     }
     value = 0;
     if (store(ctx, csumoff, &value, 2) < 0) return XDP_ABORTED;
-    __u32 sum = pseudo + protocol + newl4len;
+    __s64 pseudo_sum;
+    if (type == ETH_P_IP) {
+        pseudo_words[2] = bpf_htonl((protocol << 16) | newl4len);
+        pseudo_sum = bpf_csum_diff(0, 0, pseudo_words, 12, 0);
+    } else {
+        pseudo_words[8] = bpf_htonl(newl4len);
+        pseudo_words[9] = bpf_htonl(protocol);
+        pseudo_sum = bpf_csum_diff(0, 0, pseudo_words, 40, 0);
+    }
+    if (pseudo_sum < 0) return XDP_ABORTED;
+    __u32 sum = (__u32)pseudo_sum;
     if (packet_sum(ctx, l4off, newl4len, &sum) < 0) return XDP_ABORTED;
     __u16 result = fold(sum);
     if (protocol == IPPROTO_UDP && !result) result = 0xffff;
-    value = bpf_htons(result);
+    value = result;
     if (store(ctx, csumoff, &value, 2) < 0) return XDP_ABORTED;
     return XDP_PASS;
 }
