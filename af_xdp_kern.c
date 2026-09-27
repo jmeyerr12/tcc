@@ -45,68 +45,71 @@ struct sum_ctx {
     int error;
 };
 
-/* Soma em ordem de rede. O bloco e zerado antes da leitura, portanto os bytes
- * de padding do ultimo bloco nao alteram o checksum. bpf_csum_diff processa o
- * bloco inteiro no kernel e evita dezenas de instrucoes BPF por callback.
+/* O verifier 6.2 associa cada callback de bpf_loop a um unico tipo/local de
+ * contexto na pilha. Como os checksums IP e L4 sao calculados em pontos
+ * diferentes do programa, use callbacks distintos com implementacao identica.
+ * Kernels mais novos conseguem reutilizar um unico callback, mas esta forma e
+ * compativel com ambos e nao muda o caminho executado por pacote.
  */
-static long sum_block(__u32 i, void *opaque)
-{
-    struct sum_ctx *s = opaque;
-    __u8 bytes[BLOCK_BYTES] = {};
-    __u32 pos;
-    __u32 size;
-
-    /* O verifier analisa o callback separadamente e precisa deste limite
-     * explicito antes de aceitar length - pos como tamanho de helper. O AND
-     * tambem descarta os bits superiores desconhecidos do registrador que o
-     * Clang reutiliza para o argumento __u32 do callback.
-     */
-    i &= 63;
-    if (i >= MAX_SUM_BLOCKS) {
-        s->error = 1;
-        return 1;
-    }
-    pos = i * BLOCK_BYTES;
-    if (pos >= s->length) return 1;
-    size = s->length - pos;
-    if (size > BLOCK_BYTES) size = BLOCK_BYTES;
-    /* Expresse o intervalo como (size - 1) < BLOCK_BYTES. Verifiers mais
-     * antigos nao preservam necessariamente o limite inferior do teste
-     * separado `size != 0`, mas reconhecem que somar 1 ao valor 0..255
-     * produz exatamente o intervalo 1..256 exigido pelo helper.
-     */
-    size--;
-    asm volatile("" : "+r"(size));
-    if (size >= BLOCK_BYTES) {
-        s->error = 1;
-        return 1;
-    }
-    size++;
-    if (load(s->xdp, s->offset + pos, bytes, size) < 0) {
-        s->error = 1;
-        return 1;
-    }
-
-    __s64 result = bpf_csum_diff(0, 0, (__be32 *)bytes,
-                                 sizeof(bytes), s->sum);
-    if (result < 0) {
-        s->error = 1;
-        return 1;
-    }
-    s->sum = (__u32)result;
-    return 0;
+#define DEFINE_SUM_BLOCK(NAME)                                                \
+static long NAME(__u32 i, void *opaque)                                      \
+{                                                                             \
+    struct sum_ctx *s = opaque;                                               \
+    __u8 bytes[BLOCK_BYTES] = {};                                             \
+    __u32 pos;                                                                \
+    __u32 size;                                                               \
+                                                                              \
+    i &= 63;                                                                  \
+    if (i >= MAX_SUM_BLOCKS) {                                                \
+        s->error = 1;                                                         \
+        return 1;                                                             \
+    }                                                                         \
+    pos = i * BLOCK_BYTES;                                                    \
+    if (pos >= s->length) return 1;                                           \
+    size = s->length - pos;                                                   \
+    if (size > BLOCK_BYTES) size = BLOCK_BYTES;                               \
+    /* Prova ao verifier que o helper recebe exatamente 1..256 bytes. */      \
+    size--;                                                                   \
+    asm volatile("" : "+r"(size));                                          \
+    if (size >= BLOCK_BYTES) {                                                \
+        s->error = 1;                                                         \
+        return 1;                                                             \
+    }                                                                         \
+    size++;                                                                   \
+    if (load(s->xdp, s->offset + pos, bytes, size) < 0) {                     \
+        s->error = 1;                                                         \
+        return 1;                                                             \
+    }                                                                         \
+                                                                              \
+    __s64 result = bpf_csum_diff(0, 0, (__be32 *)bytes,                       \
+                                 sizeof(bytes), s->sum);                      \
+    if (result < 0) {                                                         \
+        s->error = 1;                                                         \
+        return 1;                                                             \
+    }                                                                         \
+    s->sum = (__u32)result;                                                   \
+    return 0;                                                                 \
 }
 
-static __always_inline int packet_sum(struct xdp_md *ctx, __u32 offset,
-                                      __u32 length, __u32 *sum)
-{
-    if (length > MAX_SUM_BYTES) return -1;
-    struct sum_ctx s = { .xdp = ctx, .offset = offset, .length = length, .sum = *sum };
-    if (loop((length + BLOCK_BYTES - 1) / BLOCK_BYTES,
-             sum_block, &s, 0) < 0 || s.error) return -1;
-    *sum = s.sum;
-    return 0;
+DEFINE_SUM_BLOCK(sum_ip_block)
+DEFINE_SUM_BLOCK(sum_l4_block)
+
+#define DEFINE_PACKET_SUM(NAME, CALLBACK)                                    \
+static __always_inline int NAME(struct xdp_md *ctx, __u32 offset,             \
+                                __u32 length, __u32 *sum)                     \
+{                                                                             \
+    if (length > MAX_SUM_BYTES) return -1;                                    \
+    struct sum_ctx s = {                                                      \
+        .xdp = ctx, .offset = offset, .length = length, .sum = *sum           \
+    };                                                                        \
+    if (loop((length + BLOCK_BYTES - 1) / BLOCK_BYTES,                        \
+             CALLBACK, &s, 0) < 0 || s.error) return -1;                      \
+    *sum = s.sum;                                                             \
+    return 0;                                                                 \
 }
+
+DEFINE_PACKET_SUM(packet_sum_ip, sum_ip_block)
+DEFINE_PACKET_SUM(packet_sum_l4, sum_l4_block)
 
 static __always_inline __u16 fold(__u32 sum)
 {
@@ -385,7 +388,7 @@ int xdp_ids_func(struct xdp_md *ctx)
         value = 0;
         if (store(ctx, ipoff + 10, &value, 2) < 0) return XDP_ABORTED;
         __u32 sum = 0;
-        if (packet_sum(ctx, ipoff, iphlen, &sum) < 0) return XDP_ABORTED;
+        if (packet_sum_ip(ctx, ipoff, iphlen, &sum) < 0) return XDP_ABORTED;
         /* bpf_csum_diff e fold produzem __sum16 pronto para ser armazenado. */
         value = fold(sum);
         if (store(ctx, ipoff + 10, &value, 2) < 0) return XDP_ABORTED;
@@ -410,7 +413,7 @@ int xdp_ids_func(struct xdp_md *ctx)
     }
     if (pseudo_sum < 0) return XDP_ABORTED;
     __u32 sum = (__u32)pseudo_sum;
-    if (packet_sum(ctx, l4off, newl4len, &sum) < 0) return XDP_ABORTED;
+    if (packet_sum_l4(ctx, l4off, newl4len, &sum) < 0) return XDP_ABORTED;
     __u16 result = fold(sum);
     if (protocol == IPPROTO_UDP && !result) result = 0xffff;
     value = result;
