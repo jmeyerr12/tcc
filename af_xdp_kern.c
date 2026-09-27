@@ -70,13 +70,18 @@ static long sum_block(__u32 i, void *opaque)
     if (pos >= s->length) return 1;
     size = s->length - pos;
     if (size > BLOCK_BYTES) size = BLOCK_BYTES;
-    /* Mantem 1..64 inalterado e torna o limite assinado evidente ao verifier. */
+    /* Expresse o intervalo como (size - 1) < BLOCK_BYTES. Verifiers mais
+     * antigos nao preservam necessariamente o limite inferior do teste
+     * separado `size != 0`, mas reconhecem que somar 1 ao valor 0..255
+     * produz exatamente o intervalo 1..256 exigido pelo helper.
+     */
+    size--;
     asm volatile("" : "+r"(size));
-    size &= (BLOCK_BYTES * 2 - 1);
-    if (!size || size > BLOCK_BYTES) {
+    if (size >= BLOCK_BYTES) {
         s->error = 1;
         return 1;
     }
+    size++;
     if (load(s->xdp, s->offset + pos, bytes, size) < 0) {
         s->error = 1;
         return 1;
@@ -132,12 +137,13 @@ static long copy_block(__u32 i, void *opaque)
     if (pos >= c->length) return 1;
     size = c->length - pos;
     if (size > BLOCK_BYTES) size = BLOCK_BYTES;
+    size--;
     asm volatile("" : "+r"(size));
-    size &= (BLOCK_BYTES * 2 - 1);
-    if (!size || size > BLOCK_BYTES) {
+    if (size >= BLOCK_BYTES) {
         c->error = 1;
         return 1;
     }
+    size++;
     if (load(c->xdp, c->src + pos, bytes, size) < 0 ||
         store(c->xdp, c->dst + pos, bytes, size) < 0) {
         c->error = 1;
