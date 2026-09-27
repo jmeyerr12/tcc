@@ -134,6 +134,12 @@ suricata \
     >"${RESULT_DIR}/suricata-console.log" 2>&1 &
 SURI_PID=$!
 
+suricata_ready() {
+    grep -qi 'engine started[.]' \
+        "${RESULT_DIR}/suricata.log" \
+        "${RESULT_DIR}/suricata-console.log" 2>/dev/null
+}
+
 for _ in {1..30}; do
     if ! kill -0 "${SURI_PID}" 2>/dev/null; then
         wait "${SURI_PID}" || true
@@ -141,13 +147,13 @@ for _ in {1..30}; do
         tail -n 40 "${RESULT_DIR}/suricata-console.log" >&2
         exit 1
     fi
-    if grep -q 'Engine started\.' "${RESULT_DIR}/suricata.log" 2>/dev/null; then
+    if suricata_ready; then
         break
     fi
     sleep 0.2
 done
 
-if ! grep -q 'Engine started\.' "${RESULT_DIR}/suricata.log" 2>/dev/null; then
+if ! suricata_ready; then
     echo "Suricata nao confirmou a inicializacao dentro do prazo" >&2
     tail -n 40 "${RESULT_DIR}/suricata-console.log" >&2
     exit 1
