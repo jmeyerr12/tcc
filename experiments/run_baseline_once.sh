@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ "${EUID}" -ne 0 ]]; then
-    echo "execute como root: sudo $0 {application|transport|ip} TAXA_MBPS [DURACAO_S] [GERADORES]" >&2
+    echo "execute como root: sudo $0 {application|transport|ip} TAXA_MBPS [DURACAO_S] [GERADORES] [THREADS_IDS|auto]" >&2
     exit 1
 fi
 
@@ -10,6 +10,7 @@ RULESET="${1:-application}"
 RATE_MBPS="${2:-500}"
 DURATION_S="${3:-10}"
 GENERATORS="${4:-1}"
+IDS_THREADS="${5:-${IDS_THREADS:-auto}}"
 MODE="${EXPERIMENT_MODE:-baseline}"
 TX_IF="${TX_IF:-tcc-tx}"
 IDS_IF="${IDS_IF:-tcc-ids}"
@@ -53,6 +54,10 @@ if [[ ! "${GENERATORS}" =~ ^[1-9][0-9]*$ ]]; then
     echo "o numero de geradores deve ser um inteiro positivo" >&2
     exit 2
 fi
+if [[ "${IDS_THREADS}" != auto && ! "${IDS_THREADS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "threads do IDS deve ser um inteiro positivo ou auto" >&2
+    exit 2
+fi
 
 for path in "${PCAP}" "${RULES}" /etc/suricata/suricata.yaml; do
     if [[ ! -r "${path}" ]]; then
@@ -88,7 +93,11 @@ case "${MODE}" in
 esac
 
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-RESULT_DIR="${SCRIPT_DIR}/results/${MODE}_${RULESET}_${RATE_MBPS}mbps_g${GENERATORS}_${TIMESTAMP}"
+THREAD_SUFFIX=""
+if [[ "${IDS_THREADS}" != auto ]]; then
+    THREAD_SUFFIX="_w${IDS_THREADS}"
+fi
+RESULT_DIR="${SCRIPT_DIR}/results/${MODE}_${RULESET}_${RATE_MBPS}mbps_g${GENERATORS}${THREAD_SUFFIX}_${TIMESTAMP}"
 mkdir -p "${RESULT_DIR}"
 
 read_counter() {
@@ -128,6 +137,7 @@ suricata \
     -S "${RULES}" \
     -l "${RESULT_DIR}" \
     --pidfile "${RESULT_DIR}/suricata.pid" \
+    --set af-packet.0.threads="${IDS_THREADS}" \
     --set stats.interval=1 \
     --set outputs.0.fast.enabled=no \
     --set outputs.1.eve-log.enabled=no \
@@ -157,6 +167,15 @@ if ! suricata_ready; then
     echo "Suricata nao confirmou a inicializacao dentro do prazo" >&2
     tail -n 40 "${RESULT_DIR}/suricata-console.log" >&2
     exit 1
+fi
+
+if [[ "${IDS_THREADS}" != auto ]]; then
+    STARTED_THREADS="$(sed -nE 's/.*all ([0-9]+) packet processing threads?.*/\1/p' \
+        "${RESULT_DIR}/suricata-console.log" | tail -n 1)"
+    if [[ "${STARTED_THREADS}" != "${IDS_THREADS}" ]]; then
+        echo "Suricata iniciou com ${STARTED_THREADS:-numero desconhecido} threads; solicitado: ${IDS_THREADS}" >&2
+        exit 1
+    fi
 fi
 
 sleep 1
@@ -209,8 +228,8 @@ RX_BYTES_AFTER="$(read_counter "${IDS_IF}" rx_bytes)"
 RX_DROPPED_AFTER="$(read_counter "${IDS_IF}" rx_dropped)"
 
 {
-    printf 'mode\truleset\ttarget_mbps\tduration_s\tgenerators\n'
-    printf '%s\t%s\t%s\t%s\t%s\n' "${MODE}" "${RULESET}" "${RATE_MBPS}" "${DURATION_S}" "${GENERATORS}"
+    printf 'mode\truleset\ttarget_mbps\tduration_s\tgenerators\tids_threads\n'
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${MODE}" "${RULESET}" "${RATE_MBPS}" "${DURATION_S}" "${GENERATORS}" "${IDS_THREADS}"
     printf '\ninterface\tcounter\tbefore\tafter\tdelta\n'
     printf '%s\ttx_packets\t%s\t%s\t%s\n' "${TX_IF}" "${TX_PACKETS_BEFORE}" "${TX_PACKETS_AFTER}" "$((TX_PACKETS_AFTER - TX_PACKETS_BEFORE))"
     printf '%s\ttx_bytes\t%s\t%s\t%s\n' "${TX_IF}" "${TX_BYTES_BEFORE}" "${TX_BYTES_AFTER}" "$((TX_BYTES_AFTER - TX_BYTES_BEFORE))"
@@ -256,11 +275,11 @@ IDS_PPS="$(awk -v offered="${ACTUAL_PPS}" -v sent="${SENT_PACKETS}" -v ids="${ID
 IDS_BYTE_REDUCTION_PERCENT="$(awk -v sent="${SENT_BYTES}" -v ids="${IDS_BYTES}" 'BEGIN { printf "%.6f", sent == 0 ? 0 : 100 * (sent - ids) / sent }')"
 
 {
-    printf 'mode\truleset\ttarget_mbps\tactual_mbps\ttarget_achievement_percent\tactual_pps\tids_mbps\tids_pps\tids_byte_reduction_percent\trequested_duration_s\tactual_duration_s\tgenerators\ttcpreplay_enobufs\tinterface_tx_dropped\tsent_packets\tsent_bytes\tids_packets\tids_bytes\tkernel_packets\tkernel_drops\tinvalid_checksums\tcapture_loss_percent\tend_to_end_loss_percent\n'
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf 'mode\truleset\ttarget_mbps\tactual_mbps\ttarget_achievement_percent\tactual_pps\tids_mbps\tids_pps\tids_byte_reduction_percent\trequested_duration_s\tactual_duration_s\tgenerators\tids_threads\ttcpreplay_enobufs\tinterface_tx_dropped\tsent_packets\tsent_bytes\tids_packets\tids_bytes\tkernel_packets\tkernel_drops\tinvalid_checksums\tcapture_loss_percent\tend_to_end_loss_percent\n'
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "${MODE}" "${RULESET}" "${RATE_MBPS}" "${ACTUAL_MBPS}" "${TARGET_ACHIEVEMENT_PERCENT}" \
         "${ACTUAL_PPS}" "${IDS_MBPS}" "${IDS_PPS}" \
-        "${IDS_BYTE_REDUCTION_PERCENT}" "${DURATION_S}" "${ACTUAL_DURATION_S}" "${GENERATORS}" \
+        "${IDS_BYTE_REDUCTION_PERCENT}" "${DURATION_S}" "${ACTUAL_DURATION_S}" "${GENERATORS}" "${IDS_THREADS}" \
         "${ENOBUFS_RETRIES}" "${TX_DROPPED_DELTA}" \
         "${SENT_PACKETS}" "${SENT_BYTES}" "${IDS_PACKETS}" "${IDS_BYTES}" \
         "${KERNEL_PACKETS}" "${KERNEL_DROPS}" "${INVALID_CHECKSUMS}" \
