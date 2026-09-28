@@ -150,6 +150,10 @@ int main() {
     expectIntervals(mergeIntervals({{2, 6}, {0, 3}, {1, 2}}), {{0, 6}});
     expectIntervals(mergeIntervals({{4, 7}, {0, 3}}), {{0, 7}});
     expectIntervals(mergeIntervals({{LLONG_MAX, LLONG_MAX}, {0, LLONG_MAX}}), {{0, LLONG_MAX}});
+    expectIntervals(preserveSmallLeadingGap({{4, 183}}, 4), {{0, 183}});
+    expectIntervals(preserveSmallLeadingGap({{5, 183}}, 4), {{5, 183}});
+    expectIntervals(preserveSmallLeadingGap({{4, 7}, {10, 12}}, 4), {{0, 7}, {10, 12}});
+    expectIntervals(preserveSmallLeadingGap({}, 4), {});
     expectIntervals(getCuts({{0, 3}, {8, 11}}), {{4, 7}});
     expectIntervals(getCuts({{2, 3}, {8, 11}}), {{0, 1}, {4, 7}});
     expectIntervals(adjustIntervals({{2, 3}, {8, 11}}, {{0, 1}, {4, 7}}), {{0, 1}, {2, 5}});

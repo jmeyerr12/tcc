@@ -8,6 +8,10 @@
 
 RuleAnalysis analyzeRule(const std::string& line);
 std::vector<Interval> mergeIntervals(std::vector<Interval> intervals);
+std::vector<Interval> preserveSmallLeadingGap(
+    std::vector<Interval> merged,
+    long long maxBytes
+);
 std::vector<Interval> getCuts(const std::vector<Interval>& merged);
 std::vector<Interval> adjustIntervals(
     const std::vector<Interval>& intervals,

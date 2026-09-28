@@ -364,6 +364,22 @@ vector<Interval> mergeIntervals(vector<Interval> intervals) {
     return merged;
 }
 
+vector<Interval> preserveSmallLeadingGap(
+    vector<Interval> merged,
+    long long maxBytes
+) {
+    if (merged.empty() || maxBytes < 0) return merged;
+
+    // A short leading cut forces every retained payload byte to be moved.
+    // Keeping those few bytes trades negligible output size for a zero-copy
+    // prefix when the first required interval already starts near byte zero.
+    if (merged[0].start > 0 && merged[0].start <= maxBytes) {
+        merged[0].start = 0;
+    }
+
+    return merged;
+}
+
 vector<Interval> getCuts(const vector<Interval>& merged) {
     vector<Interval> cuts;
     if (merged.empty()) return cuts;
