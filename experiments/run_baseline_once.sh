@@ -11,6 +11,8 @@ RATE_MBPS="${2:-500}"
 DURATION_S="${3:-10}"
 GENERATORS="${4:-1}"
 IDS_THREADS="${5:-${IDS_THREADS:-auto}}"
+IDS_CPUS="${IDS_CPUS:-auto}"
+REPLAY_CPUS="${REPLAY_CPUS:-auto}"
 MODE="${EXPERIMENT_MODE:-baseline}"
 TX_IF="${TX_IF:-tcc-tx}"
 IDS_IF="${IDS_IF:-tcc-ids}"
@@ -57,6 +59,28 @@ fi
 if [[ "${IDS_THREADS}" != auto && ! "${IDS_THREADS}" =~ ^[1-9][0-9]*$ ]]; then
     echo "threads do IDS deve ser um inteiro positivo ou auto" >&2
     exit 2
+fi
+
+REPLAY_CPU_LIST=()
+if [[ "${IDS_CPUS}" != auto ]]; then
+    if ! taskset --cpu-list "${IDS_CPUS}" true >/dev/null 2>&1; then
+        echo "lista de CPUs do IDS invalida ou indisponivel: ${IDS_CPUS}" >&2
+        exit 2
+    fi
+fi
+if [[ "${REPLAY_CPUS}" != auto ]]; then
+    IFS=',' read -r -a REPLAY_CPU_LIST <<<"${REPLAY_CPUS}"
+    if (( ${#REPLAY_CPU_LIST[@]} < GENERATORS )); then
+        echo "REPLAY_CPUS precisa informar ao menos uma CPU por gerador" >&2
+        exit 2
+    fi
+    for cpu in "${REPLAY_CPU_LIST[@]}"; do
+        if [[ ! "${cpu}" =~ ^[0-9]+$ ]] ||
+           ! taskset --cpu-list "${cpu}" true >/dev/null 2>&1; then
+            echo "CPU do gerador invalida ou indisponivel: ${cpu}" >&2
+            exit 2
+        fi
+    done
 fi
 
 for path in "${PCAP}" "${RULES}" /etc/suricata/suricata.yaml; do
@@ -129,7 +153,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-suricata \
+SURI_CMD=(suricata \
     -c /etc/suricata/suricata.yaml \
     --af-packet="${IDS_IF}" \
     --runmode=workers \
@@ -140,7 +164,11 @@ suricata \
     --set af-packet.1.threads="${IDS_THREADS}" \
     --set stats.interval=1 \
     --set outputs.0.fast.enabled=no \
-    --set outputs.1.eve-log.enabled=no \
+    --set outputs.1.eve-log.enabled=no)
+if [[ "${IDS_CPUS}" != auto ]]; then
+    SURI_CMD=(taskset --cpu-list "${IDS_CPUS}" "${SURI_CMD[@]}")
+fi
+"${SURI_CMD[@]}" \
     >"${RESULT_DIR}/suricata-console.log" 2>&1 &
 SURI_PID=$!
 
@@ -183,13 +211,17 @@ fi
 sleep 1
 RATE_PER_GENERATOR="$(awk -v rate="${RATE_MBPS}" -v generators="${GENERATORS}" 'BEGIN { printf "%.6f", rate / generators }')"
 for ((generator = 1; generator <= GENERATORS; ++generator)); do
-    tcpreplay \
+    REPLAY_CMD=(tcpreplay \
         --intf1="${TX_IF}" \
         --preload-pcap \
         --loop=0 \
         --duration="${DURATION_S}" \
         --mbps="${RATE_PER_GENERATOR}" \
-        "${PCAP}" \
+        "${PCAP}")
+    if [[ "${REPLAY_CPUS}" != auto ]]; then
+        REPLAY_CMD=(taskset --cpu-list "${REPLAY_CPU_LIST[generator - 1]}" "${REPLAY_CMD[@]}")
+    fi
+    "${REPLAY_CMD[@]}" \
         >"${RESULT_DIR}/tcpreplay-${generator}.log" 2>&1 &
     REPLAY_PIDS+=("$!")
 done
@@ -230,8 +262,10 @@ RX_BYTES_AFTER="$(read_counter "${IDS_IF}" rx_bytes)"
 RX_DROPPED_AFTER="$(read_counter "${IDS_IF}" rx_dropped)"
 
 {
-    printf 'mode\truleset\ttarget_mbps\tduration_s\tgenerators\tids_threads\n'
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${MODE}" "${RULESET}" "${RATE_MBPS}" "${DURATION_S}" "${GENERATORS}" "${IDS_THREADS}"
+    printf 'mode\truleset\ttarget_mbps\tduration_s\tgenerators\tids_threads\tids_cpus\treplay_cpus\n'
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "${MODE}" "${RULESET}" "${RATE_MBPS}" "${DURATION_S}" \
+        "${GENERATORS}" "${IDS_THREADS}" "${IDS_CPUS}" "${REPLAY_CPUS}"
     printf '\ninterface\tcounter\tbefore\tafter\tdelta\n'
     printf '%s\ttx_packets\t%s\t%s\t%s\n' "${TX_IF}" "${TX_PACKETS_BEFORE}" "${TX_PACKETS_AFTER}" "$((TX_PACKETS_AFTER - TX_PACKETS_BEFORE))"
     printf '%s\ttx_bytes\t%s\t%s\t%s\n' "${TX_IF}" "${TX_BYTES_BEFORE}" "${TX_BYTES_AFTER}" "$((TX_BYTES_AFTER - TX_BYTES_BEFORE))"
@@ -277,11 +311,12 @@ IDS_PPS="$(awk -v offered="${ACTUAL_PPS}" -v sent="${SENT_PACKETS}" -v ids="${ID
 IDS_BYTE_REDUCTION_PERCENT="$(awk -v sent="${SENT_BYTES}" -v ids="${IDS_BYTES}" 'BEGIN { printf "%.6f", sent == 0 ? 0 : 100 * (sent - ids) / sent }')"
 
 {
-    printf 'mode\truleset\ttarget_mbps\tactual_mbps\ttarget_achievement_percent\tactual_pps\tids_mbps\tids_pps\tids_byte_reduction_percent\trequested_duration_s\tactual_duration_s\tgenerators\tids_threads\ttcpreplay_enobufs\tinterface_tx_dropped\tsent_packets\tsent_bytes\tids_packets\tids_bytes\tkernel_packets\tkernel_drops\tinvalid_checksums\tcapture_loss_percent\tend_to_end_loss_percent\n'
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf 'mode\truleset\ttarget_mbps\tactual_mbps\ttarget_achievement_percent\tactual_pps\tids_mbps\tids_pps\tids_byte_reduction_percent\trequested_duration_s\tactual_duration_s\tgenerators\tids_threads\tids_cpus\treplay_cpus\ttcpreplay_enobufs\tinterface_tx_dropped\tsent_packets\tsent_bytes\tids_packets\tids_bytes\tkernel_packets\tkernel_drops\tinvalid_checksums\tcapture_loss_percent\tend_to_end_loss_percent\n'
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "${MODE}" "${RULESET}" "${RATE_MBPS}" "${ACTUAL_MBPS}" "${TARGET_ACHIEVEMENT_PERCENT}" \
         "${ACTUAL_PPS}" "${IDS_MBPS}" "${IDS_PPS}" \
         "${IDS_BYTE_REDUCTION_PERCENT}" "${DURATION_S}" "${ACTUAL_DURATION_S}" "${GENERATORS}" "${IDS_THREADS}" \
+        "${IDS_CPUS}" "${REPLAY_CPUS}" \
         "${ENOBUFS_RETRIES}" "${TX_DROPPED_DELTA}" \
         "${SENT_PACKETS}" "${SENT_BYTES}" "${IDS_PACKETS}" "${IDS_BYTES}" \
         "${KERNEL_PACKETS}" "${KERNEL_DROPS}" "${INVALID_CHECKSUMS}" \

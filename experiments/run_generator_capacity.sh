@@ -11,6 +11,7 @@ DURATION_S="${2:-10}"
 GENERATORS="${3:-1}"
 TX_IF="${TX_IF:-tcc-tx}"
 IDS_IF="${IDS_IF:-tcc-ids}"
+REPLAY_CPUS="${REPLAY_CPUS:-auto}"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PCAP="${PCAP:-${SCRIPT_DIR}/pcaps/CICIDS2017-Monday-mtu1500.pcap}"
@@ -29,6 +30,22 @@ fi
 if [[ ! "${GENERATORS}" =~ ^[1-9][0-9]*$ ]]; then
     echo "geradores deve ser um inteiro positivo" >&2
     exit 2
+fi
+
+REPLAY_CPU_LIST=()
+if [[ "${REPLAY_CPUS}" != auto ]]; then
+    IFS=',' read -r -a REPLAY_CPU_LIST <<<"${REPLAY_CPUS}"
+    if (( ${#REPLAY_CPU_LIST[@]} < GENERATORS )); then
+        echo "REPLAY_CPUS precisa informar ao menos uma CPU por gerador" >&2
+        exit 2
+    fi
+    for cpu in "${REPLAY_CPU_LIST[@]}"; do
+        if [[ ! "${cpu}" =~ ^[0-9]+$ ]] ||
+           ! taskset --cpu-list "${cpu}" true >/dev/null 2>&1; then
+            echo "CPU do gerador invalida ou indisponivel: ${cpu}" >&2
+            exit 2
+        fi
+    done
 fi
 if [[ ! -r "${PCAP}" ]]; then
     echo "PCAP ausente ou ilegivel: ${PCAP}" >&2
@@ -75,13 +92,17 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 for ((generator = 1; generator <= GENERATORS; ++generator)); do
-    tcpreplay \
+    REPLAY_CMD=(tcpreplay \
         --intf1="${TX_IF}" \
         --preload-pcap \
         --loop=0 \
         --duration="${DURATION_S}" \
         --topspeed \
-        "${PCAP}" \
+        "${PCAP}")
+    if [[ "${REPLAY_CPUS}" != auto ]]; then
+        REPLAY_CMD=(taskset --cpu-list "${REPLAY_CPU_LIST[generator - 1]}" "${REPLAY_CMD[@]}")
+    fi
+    "${REPLAY_CMD[@]}" \
         >"${RESULT_DIR}/tcpreplay-${generator}.log" 2>&1 &
     REPLAY_PIDS+=("$!")
 done
@@ -110,9 +131,9 @@ ACTUAL_DURATION_S="$(awk '/^Actual:/ { if ($8 > maximum) maximum = $8 } END { pr
 ENOBUFS_RETRIES="$(awk '/Retried packets \(ENOBUFS\):/ { sum += $NF } END { print sum + 0 }' "${RESULT_DIR}"/tcpreplay-*.log)"
 
 {
-    printf 'scenario\tduration_s\tgenerators\tactual_mbps\tactual_pps\tsent_packets\tsent_bytes\ttcpreplay_enobufs\tinterface_tx_packets\tinterface_tx_bytes\tinterface_tx_dropped\n'
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "${SCENARIO}" "${ACTUAL_DURATION_S}" "${GENERATORS}" \
+    printf 'scenario\tduration_s\tgenerators\treplay_cpus\tactual_mbps\tactual_pps\tsent_packets\tsent_bytes\ttcpreplay_enobufs\tinterface_tx_packets\tinterface_tx_bytes\tinterface_tx_dropped\n'
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "${SCENARIO}" "${ACTUAL_DURATION_S}" "${GENERATORS}" "${REPLAY_CPUS}" \
         "${ACTUAL_MBPS}" "${ACTUAL_PPS}" "${SENT_PACKETS}" "${SENT_BYTES}" \
         "${ENOBUFS_RETRIES}" \
         "$((TX_PACKETS_AFTER - TX_PACKETS_BEFORE))" \
