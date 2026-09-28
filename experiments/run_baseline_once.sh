@@ -137,7 +137,7 @@ suricata \
     -S "${RULES}" \
     -l "${RESULT_DIR}" \
     --pidfile "${RESULT_DIR}/suricata.pid" \
-    --set af-packet.0.threads="${IDS_THREADS}" \
+    --set af-packet.1.threads="${IDS_THREADS}" \
     --set stats.interval=1 \
     --set outputs.0.fast.enabled=no \
     --set outputs.1.eve-log.enabled=no \
@@ -170,7 +170,9 @@ if ! suricata_ready; then
 fi
 
 if [[ "${IDS_THREADS}" != auto ]]; then
-    STARTED_THREADS="$(sed -nE 's/.*all ([0-9]+) packet processing threads?.*/\1/p' \
+    STARTED_THREADS="$(sed -nE \
+        -e 's/.*Threads created -> W: ([0-9]+).*/\1/p' \
+        -e 's/.*all ([0-9]+) packet processing threads?.*/\1/p' \
         "${RESULT_DIR}/suricata-console.log" | tail -n 1)"
     if [[ "${STARTED_THREADS}" != "${IDS_THREADS}" ]]; then
         echo "Suricata iniciou com ${STARTED_THREADS:-numero desconhecido} threads; solicitado: ${IDS_THREADS}" >&2
