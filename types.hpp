@@ -85,10 +85,7 @@ struct PipelineData {
     std::vector<Interval> intervals;
     std::vector<Interval> merged;
     std::vector<Interval> cuts;
-    long long leadingGapPreserved;
     Stats stats;
-
-    PipelineData() : leadingGapPreserved(0) {}
 };
 
 #endif

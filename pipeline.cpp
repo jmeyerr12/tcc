@@ -12,8 +12,6 @@ using namespace std;
 
 // pipeline
 
-static const long long MAX_LEADING_GAP_TO_PRESERVE = 4;
-
 static bool loadRules(const string& filename, vector<string>& lines) {
     ifstream input(filename.c_str());
     if (!input) return false;
@@ -93,11 +91,6 @@ static void printSummary(const PipelineData& data) {
     cout << "Intervalos extraidos: " << data.intervals.size() << "\n";
     cout << "Intervalos apos merge: " << data.merged.size() << "\n\n";
 
-    if (data.leadingGapPreserved > 0) {
-        cout << "Otimizacao de copia: " << data.leadingGapPreserved
-             << " bytes iniciais preservados para evitar mover o payload.\n\n";
-    }
-
     cout << "Merged:\n";
     printIntervals(data.merged);
 
@@ -168,16 +161,6 @@ int runPipeline(int argc, char* argv[]) {
 
     // stage 3: merge required intervals
     data.merged = mergeIntervals(data.intervals);
-
-    // Retaining a very short prefix avoids shifting the entire kept payload.
-    if (!data.merged.empty() && data.merged[0].start > 0 &&
-        data.merged[0].start <= MAX_LEADING_GAP_TO_PRESERVE) {
-        data.leadingGapPreserved = data.merged[0].start;
-    }
-    data.merged = preserveSmallLeadingGap(
-        data.merged,
-        MAX_LEADING_GAP_TO_PRESERVE
-    );
 
     // stage 4: find removable gaps
     data.cuts = getCuts(data.merged);
