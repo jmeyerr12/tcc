@@ -92,13 +92,41 @@ static long sum_block(__u32 i, void *opaque)
     return 0;
 }
 
+/* Evita bpf_loop quando todo o checksum cabe em um bloco. E o caminho usado
+ * pelos headers IP e pelo segmento TCP/UDP cortado das regras de aplicacao.
+ */
+static __noinline int sum_once(struct sum_ctx *s)
+{
+    __u8 bytes[BLOCK_BYTES] = {};
+    __u32 size = s->length;
+
+    asm volatile("" : "+r"(size));
+    size &= (BLOCK_BYTES * 2 - 1);
+    if (!size || size > BLOCK_BYTES)
+        return -1;
+    if (load(s->xdp, s->offset, bytes, size) < 0)
+        return -1;
+
+    __s64 result = bpf_csum_diff(0, 0, (__be32 *)bytes,
+                                 sizeof(bytes), s->sum);
+    if (result < 0)
+        return -1;
+    s->sum = (__u32)result;
+    return 0;
+}
+
 static __always_inline int packet_sum(struct xdp_md *ctx, __u32 offset,
                                       __u32 length, __u32 *sum)
 {
+    if (!length) return 0;
     if (length > MAX_SUM_BYTES) return -1;
     struct sum_ctx s = { .xdp = ctx, .offset = offset, .length = length, .sum = *sum };
-    if (loop((length + BLOCK_BYTES - 1) / BLOCK_BYTES,
-             sum_block, &s, 0) < 0 || s.error) return -1;
+    if (length <= BLOCK_BYTES) {
+        if (sum_once(&s) < 0) return -1;
+    } else if (loop((length + BLOCK_BYTES - 1) / BLOCK_BYTES,
+                    sum_block, &s, 0) < 0 || s.error) {
+        return -1;
+    }
     *sum = s.sum;
     return 0;
 }
@@ -146,6 +174,24 @@ static long copy_block(__u32 i, void *opaque)
     return 0;
 }
 
+/* Um unico load/store e mais barato que entrar em bpf_loop para intervalos de
+ * ate 256 bytes, incluindo o intervalo 4-183 das regras de aplicacao.
+ */
+static __noinline int copy_once(struct copy_ctx *c)
+{
+    __u8 bytes[BLOCK_BYTES] = {};
+    __u32 size = c->length;
+
+    asm volatile("" : "+r"(size));
+    size &= (BLOCK_BYTES * 2 - 1);
+    if (!size || size > BLOCK_BYTES)
+        return -1;
+    if (load(c->xdp, c->src, bytes, size) < 0 ||
+        store(c->xdp, c->dst, bytes, size) < 0)
+        return -1;
+    return 0;
+}
+
 static __always_inline int copy_bytes(struct xdp_md *ctx, __u32 src,
                                       __u32 dst, __u32 length)
 {
@@ -157,6 +203,8 @@ static __always_inline int copy_bytes(struct xdp_md *ctx, __u32 src,
         .dst = dst,
         .length = length,
     };
+    if (length <= BLOCK_BYTES)
+        return copy_once(&copy);
     if (loop((length + BLOCK_BYTES - 1) / BLOCK_BYTES,
              copy_block, &copy, 0) < 0 || copy.error)
         return -1;
