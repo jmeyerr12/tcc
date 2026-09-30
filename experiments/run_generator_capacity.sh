@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${1:-baseline}" == application ]]; then
+    echo "conjunto application fora do escopo experimental atual; consulte application-rules/README.md" >&2
+    exit 2
+fi
+
 if [[ "${EUID}" -ne 0 ]]; then
-    echo "execute como root: sudo $0 {baseline|application|transport|ip} [DURACAO_S] [GERADORES]" >&2
+    echo "execute como root: sudo $0 {baseline|transport|ip} [DURACAO_S] [GERADORES]" >&2
     exit 1
 fi
 
@@ -17,7 +22,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PCAP="${PCAP:-${SCRIPT_DIR}/pcaps/CICIDS2017-Monday-mtu1500.pcap}"
 
 case "${SCENARIO}" in
-    baseline|application|transport|ip) ;;
+    baseline|transport|ip) ;;
     *)
         echo "cenario desconhecido: ${SCENARIO}" >&2
         exit 2

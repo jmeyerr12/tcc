@@ -1,5 +1,11 @@
 # Comparação entre o IDS com e sem o cortador
 
+> Registro historico: os resultados de aplicacao abaixo usam o conjunto anterior
+> de oito regras e o intervalo `4-183`. Quatro regras dependentes da identificacao
+> de HTTP/SMB/SSH foram excluidas do escopo suportado; o cenario `application`
+> esta desabilitado. Estes numeros nao validam equivalencia de deteccao nem
+> descrevem o conjunto atual. Veja [situacao do conjunto](../application-rules/README.md).
+
 ## Objetivo
 
 Comparar o desempenho do Suricata em dois modos:

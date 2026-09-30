@@ -103,6 +103,19 @@ g++ -std=c++11 -Wall -Wextra -pedantic -fsanitize=undefined \
 /tmp/tcc-test-algorithm
 ```
 
+Para verificar a exclusao dos quatro SIDs reais de HTTP/SMB/SSH, a ausencia
+de contribuicao deles aos intervalos e a consistencia dos tres pares de
+artefatos original/adaptado:
+
+```bash
+make alg
+python3 tests/test_rule_scope.py ./alg
+```
+
+O cenario experimental `application` esta desabilitado; os arquivos residuais
+continuam verificados para rastreabilidade. Veja
+[`application-rules/README.md`](../application-rules/README.md).
+
 ## Limites do ensaio
 
 - O executor aceita PCAP clássico little-endian, Ethernet/IPv4 sem opções,

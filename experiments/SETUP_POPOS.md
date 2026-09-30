@@ -3,6 +3,11 @@
 Este guia prepara uma instalação nova do Pop!_OS para comparar o Suricata sem
 o cortador (baseline) e com o cortador XDP.
 
+O cenario `application` esta desabilitado: o conjunto restante nao permite
+avaliar corte de payload com dependencias completas. Use `transport` ou `ip`;
+veja [a justificativa](../application-rules/README.md). Os comandos abaixo nao
+resolvem as demais limitacoes metodologicas da bancada.
+
 ## 1. Clonar o projeto e transferir o PCAP
 
 Os scripts e relatórios estão versionados na branch `experiments`. No notebook
@@ -115,10 +120,10 @@ Prepare as interfaces virtuais:
 sudo ./experiments/setup_veth.sh up
 ```
 
-Carregue o cortador com o menor conjunto de intervalos:
+Carregue o cortador para o conjunto de transporte:
 
 ```bash
-sudo ./experiments/setup_cutter.sh on application
+sudo ./experiments/setup_cutter.sh on transport
 sudo ./experiments/setup_cutter.sh status
 ```
 
@@ -126,9 +131,9 @@ Se aparecer `prog/xdp` na interface `tcc-ids`, o kernel aceitou e anexou o
 programa. Faça então um ensaio curto:
 
 ```bash
-sudo ./experiments/run_cutter_once.sh application 500 10 1
+sudo ./experiments/run_cutter_once.sh transport 500 10 1
 sudo ./experiments/setup_cutter.sh off
-sudo ./experiments/run_baseline_once.sh application 500 10 1
+sudo ./experiments/run_baseline_once.sh transport 500 10 1
 ```
 
 Não continue para 5 Gbit/s se algum desses comandos falhar.
@@ -141,15 +146,6 @@ do Pop!_OS e feche outros programas. Recrie a `veth` antes da bateria:
 ```bash
 cd /home/meyer/d/tcc
 sudo ./experiments/setup_veth.sh up
-```
-
-### Aplicação
-
-```bash
-sudo ./experiments/run_baseline_once.sh application 5000 10 2
-sudo ./experiments/setup_cutter.sh on application
-sudo ./experiments/run_cutter_once.sh application 5000 10 2
-sudo ./experiments/setup_cutter.sh off
 ```
 
 ### Transporte
@@ -170,7 +166,7 @@ sudo ./experiments/run_cutter_once.sh ip 5000 10 2
 sudo ./experiments/setup_cutter.sh off
 ```
 
-Cada comando informa o diretório de resultado. Preserve os seis diretórios e
+Cada comando informa o diretório de resultado. Preserve os quatro diretórios e
 compare os respectivos arquivos `summary.tsv`.
 
 ## 7. Varredura completa
@@ -179,9 +175,6 @@ Somente depois de validar os ensaios de 5 Gbit/s, execute as taxas de 500
 Mbit/s, 1, 2, 5 e 10 Gbit/s:
 
 ```bash
-sudo ./experiments/run_baseline_sweep.sh application 10
-sudo ./experiments/run_cutter_sweep.sh application 10
-
 sudo ./experiments/run_baseline_sweep.sh transport 10
 sudo ./experiments/run_cutter_sweep.sh transport 10
 

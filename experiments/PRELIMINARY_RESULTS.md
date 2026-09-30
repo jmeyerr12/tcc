@@ -1,5 +1,11 @@
 # Resultados preliminares — baseline sem cortador
 
+> Registro historico: os resultados de aplicacao abaixo usam o conjunto anterior
+> de oito regras e o intervalo `4-183`. Quatro regras dependentes da identificacao
+> de HTTP/SMB/SSH foram excluidas do escopo suportado; o cenario `application`
+> esta desabilitado. Estes numeros nao validam equivalencia de deteccao nem
+> descrevem o conjunto atual. Veja [situacao do conjunto](../application-rules/README.md).
+
 Estes resultados validam a bancada, mas **nao sao os resultados finais da
 comparacao**. Eles foram obtidos durante 10 segundos com o primeiro PCAP do
 CIC-IDS2017, antes da normalizacao dos quadros agregados. Os ensaios finais

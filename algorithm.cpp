@@ -18,23 +18,6 @@ static bool isNetworkTransportProtocol(const string& protocol) {
            protocol == "pkthdr";
 }
 
-static bool isApplicationProtocol(const string& protocol) {
-    return protocol == "http" || protocol == "http1" || protocol == "http2" ||
-           protocol == "dns" || protocol == "tls" || protocol == "ssl" ||
-           protocol == "smtp" || protocol == "ftp" || protocol == "ftp-data" ||
-           protocol == "ssh" || protocol == "smb" || protocol == "dcerpc" ||
-           protocol == "krb5" || protocol == "mqtt" || protocol == "modbus" ||
-           protocol == "pgsql" || protocol == "rdp" || protocol == "snmp" ||
-           protocol == "sip" || protocol == "rfb" || protocol == "nfs" ||
-           protocol == "ike" || protocol == "quic" || protocol == "ntp" ||
-           protocol == "dhcp" || protocol == "telnet" ||
-           protocol == "bittorrent-dht";
-}
-
-static bool isSupportedProtocol(const string& protocol) {
-    return isNetworkTransportProtocol(protocol) || isApplicationProtocol(protocol);
-}
-
 static bool isHeaderBuffer(const string& key) {
     return key == "tcp.hdr" || key == "udp.hdr" ||
            key == "ipv4.hdr" || key == "ipv6.hdr" ||
@@ -108,11 +91,12 @@ RuleAnalysis analyzeRule(const string& line) {
 
     string protocol = getRuleProtocol(line);
 
-    if (!isSupportedProtocol(protocol)) {
+    // Application identification can depend on bytes outside the explicit
+    // content windows. Only network/transport protocols are in scope.
+    if (!isNetworkTransportProtocol(protocol)) {
         return result;
     }
 
-    bool applicationProtocol = isApplicationProtocol(protocol);
     string options = line.substr(openPos + 1, closePos - openPos - 1);
     vector<Token> tokens = tokenizeOptions(options);
     vector<ContentInfo> contents;
@@ -328,11 +312,6 @@ RuleAnalysis analyzeRule(const string& line) {
     }
     // negated-only inspection still requires a nonempty packet payload.
     if (usesPayload && !positivePayload) result.intervals.push_back(Interval{0, 0});
-
-    // application protocols are kept only when a finite raw payload interval is adapted
-    if (applicationProtocol && !usesPayload) {
-        return RuleAnalysis();
-    }
 
     result.action = usesPayload ? ADAPT_RULE : KEEP_RULE;
     return result;

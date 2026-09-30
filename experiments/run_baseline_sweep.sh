@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${1:-transport}" == application ]]; then
+    echo "conjunto application fora do escopo experimental atual; consulte application-rules/README.md" >&2
+    exit 2
+fi
+
 if [[ "${EUID}" -ne 0 ]]; then
-    echo "execute como root: sudo $0 [application|transport|ip] [DURACAO_S]" >&2
+    echo "execute como root: sudo $0 [transport|ip] [DURACAO_S]" >&2
     exit 1
 fi
 
-RULESET="${1:-application}"
+RULESET="${1:-transport}"
 DURATION_S="${2:-10}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"

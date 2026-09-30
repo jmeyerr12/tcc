@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${1:-status}" == on && "${2:-}" == application ]]; then
+    echo "conjunto application fora do escopo experimental atual; consulte application-rules/README.md" >&2
+    exit 2
+fi
+
 if [[ "${EUID}" -ne 0 ]]; then
     echo "execute como root: sudo $0 {on RULESET|off|status}" >&2
     exit 1
@@ -23,11 +28,10 @@ case "${1:-status}" in
     on)
         RULESET="${2:-}"
         case "${RULESET}" in
-            application) INTERVALS=(4-183) ;;
             transport) INTERVALS=(0-313 500-1363) ;;
             ip) INTERVALS=(21-36) ;;
             *)
-                echo "conjunto desconhecido: ${RULESET}; use application, transport ou ip" >&2
+                echo "conjunto desconhecido: ${RULESET}; use transport ou ip" >&2
                 exit 2
                 ;;
         esac
@@ -77,7 +81,7 @@ case "${1:-status}" in
         fi
         ;;
     *)
-        echo "uso: sudo $0 {on application|on transport|on ip|off|status}" >&2
+        echo "uso: sudo $0 {on transport|on ip|off|status}" >&2
         exit 2
         ;;
 esac

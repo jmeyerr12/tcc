@@ -11,8 +11,10 @@ Os intervalos sao sempre calculados sobre o payload do pacote. Opcoes de
 `tcp-stream` nao alteram a base usada no calculo.
 
 Regras cujo protocolo no header e de aplicacao, como `http`, `dns`, `tls`,
-`ssh` e `smb`, tambem podem ser analisadas. Elas so sao adaptadas quando o
-`content` atua sobre o payload bruto e usa um intervalo finito suportado.
+`ssh` e `smb`, sao descartadas, mesmo com uma janela finita no payload bruto.
+O reconhecimento do protocolo pode depender de bytes fora dessa janela.
+Somente os protocolos de rede/transporte explicitamente aceitos pelo algoritmo
+entram na adaptacao; protocolos desconhecidos tambem sao descartados.
 
 Buffers especificos de aplicacao, como `http.response_body`, `http.header`, `dns.query`, `tls.certs` e `file.data`, continuam fora do escopo porque seus offsets pertencem a buffers construidos ou normalizados pelo parser do IDS, e nao diretamente ao payload bruto.
 
@@ -24,8 +26,6 @@ Por decisao de escopo, uma busca que use apenas `depth` tambem e descartada, mes
 |---|---|
 | regra de rede/transporte sem dependencia do payload | mantida sem alteracao |
 | inspecao de `tcp.hdr`, `udp.hdr`, `ipv4.hdr`, `ipv6.hdr`, `icmpv4.hdr`, `icmpv6.hdr` | mantida sem alteracao |
-| protocolo de aplicacao no header + `content` no payload bruto + `offset + depth` | adaptada como intervalo absoluto finito |
-| protocolo de aplicacao no header + cadeia relativa finita no payload bruto | adaptada pelas mesmas regras de `distance` e `within` usadas no payload bruto |
 | `content + offset + depth` | intervalo absoluto finito `offset .. offset+depth-1`; o `offset` pode ser reajustado apos os cortes |
 | `content` relativo com `within` | intervalo relativo finito; `distance` implicito igual a zero |
 | `content` relativo com `distance + within` | intervalo relativo finito; a cadeia e preservada por uma envoltoria continua |
@@ -55,7 +55,7 @@ Por decisao de escopo, uma busca que use apenas `depth` tambem e descartada, mes
 | `stream-event` | semantica fora do modelo de intervalos |
 | `app-layer-event` | semantica de camada de aplicacao nao tratada |
 | `app-layer-protocol` | semantica de camada de aplicacao nao tratada |
-| protocolo de aplicacao sem uma busca finita suportada no payload bruto | descartado |
+| protocolo de aplicacao no header, com ou sem busca finita no payload bruto | reconhecimento do protocolo nao preservado pelo modelo de intervalos |
 | buffers de aplicacao, como `http.header`, `http.uri`, `http.response_body`, `dns.query`, `tls.sni`, `tls.certs`, `file.data` e `base64_data` | nao sao tratados como offsets do payload bruto |
 
 ## regra pratica para intervalos
@@ -72,9 +72,9 @@ Atualmente, para payload bruto:
 - `content` sem limite: descartado
 - `endswith`: descartado
 
-As mesmas regras de intervalo sao usadas quando o protocolo declarado no
-header e de aplicacao, desde que nenhum sticky buffer ou buffer especifico de
-aplicacao esteja ativo.
+Essas regras de intervalo se aplicam aos protocolos de rede/transporte
+suportados. Mencionar HTTP ou outro protocolo em `msg` ou `metadata` nao
+altera a classificacao; declarar esse protocolo no header exclui a regra.
 
 Conteudos negados nao avancam o cursor das buscas relativas. Para regras so
 com conteudos negados no payload, preserva-se tambem o byte 0, evitando que
@@ -90,8 +90,9 @@ Uma regra como:
 alert http ... (content:"abc"; offset:100; depth:20; ...)
 ```
 
-pode entrar no tratamento atual porque o intervalo e calculado sobre o payload
-bruto do pacote.
+e descartada: conservar a janela `100-119` nao garante que o Suricata
+reconheca HTTP. O calculo dos intervalos continua sendo por pacote; a exclusao
+se deve a dependencia do identificador de protocolo.
 
 Uma regra como:
 
@@ -101,7 +102,15 @@ alert http ... (http.response_body; content:"abc"; offset:100; depth:20; ...)
 
 continua descartada porque o `offset` e relativo ao buffer `http.response_body`, e nao ao payload bruto original.
 
-A equivalencia semantica completa das regras de protocolo de aplicacao ainda deve ser validada experimentalmente, porque a deteccao do proprio protocolo de aplicacao pode depender dos bytes preservados pelo packet washing.
+Nao se amplia um intervalo para conservar um prefixo arbitrario. O suporte
+a protocolos de aplicacao fica como trabalho futuro, dependente de uma
+justificativa dos bytes necessarios e de validacao da deteccao.
+
+Os quatro SIDs excluidos do conjunto de aplicacao estao preservados em
+`application-rules/excluded-application.rules`. Os arquivos original/adaptado
+contem somente os quatro SIDs restantes. Esse conjunto esta desabilitado nos
+experimentos: tres regras nao inspecionam payload e a regra UDP restante
+depende de um flowbit sem produtor. Veja `application-rules/README.md`.
 
 ## observacao sobre offset zero
 
@@ -142,4 +151,6 @@ Por esse motivo, a adaptação feita atualmente para payload bruto não pode ser
 
 Uma adaptação genérica que permita remover regiões internas de `http.response_body`, `dns.query`, `tls.certs` e buffers semelhantes exigiria conhecimento da estrutura do protocolo e possivelmente parsing, normalização ou reassembly. Isso provavelmente demandaria alterações também no packet washer e, por isso, pode ser considerado fora do escopo atual e deixado como trabalho futuro.
 
-No escopo atual, regras de protocolos de aplicação podem ser adaptadas quando seus intervalos são definidos diretamente sobre o payload bruto. Regras que dependem de sticky buffers permanecem fora da adaptação automática.
+No escopo atual, tanto protocolos de aplicação no header quanto buffers de
+aplicação ficam fora da adaptação automática, mesmo quando há intervalos
+finitos explícitos. As possibilidades acima são extensões futuras.

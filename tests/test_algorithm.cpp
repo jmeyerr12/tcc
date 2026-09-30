@@ -91,19 +91,24 @@ int main() {
     expect("udp", "flow:stateless,to_server;" + content, ADAPT_RULE);
     expect("udp", "flow:only_stream;" + content, ADAPT_RULE);
 
+    // Finite raw content does not preserve application protocol identification.
     for (const string protocol : {"http", "http1", "http2", "ssh", "smb",
-                                 "tls", "ssl", "ftp", "ftp-data", "smtp"}) {
-        expect(protocol, content, ADAPT_RULE);
-        expect(protocol, "flow:established,to_server;" + content, ADAPT_RULE);
-        expect(protocol, "flow:no_stream;" + content, ADAPT_RULE);
-        expect(protocol, "tcp.flags:A;" + content, ADAPT_RULE);
-        expect(protocol, "flow:only_stream; tcp.flags:A;" + content, ADAPT_RULE);
+                                 "tls", "ssl", "ftp", "ftp-data", "smtp",
+                                 "dns", "quic", "snmp", "ntp", "dhcp", "ike",
+                                 "bittorrent-dht", "krb5", "sip", "nfs", "dcerpc",
+                                 "mqtt", "modbus", "pgsql", "rdp", "rfb", "telnet",
+                                 "HTTP", "unknown-application"}) {
+        expect(protocol, content, DISCARD_RULE);
+        expect(protocol, "flow:established,to_server;" + content, DISCARD_RULE);
+        expect(protocol, "flow:no_stream;" + content, DISCARD_RULE);
+        expect(protocol, "flow:only_stream; tcp.flags:A;" + content, DISCARD_RULE);
+        expect(protocol, "pkt_data;" + content, DISCARD_RULE);
+        expect(protocol, "tcp.hdr; content:\"|00 50|\"; offset:2; depth:2;", DISCARD_RULE);
+        expect(protocol, "flow:established;", DISCARD_RULE);
     }
-    for (const string protocol : {"dns", "quic", "snmp", "ntp", "dhcp", "ike",
-                                 "bittorrent-dht", "krb5", "sip", "nfs", "dcerpc"}) {
-        expect(protocol, content, ADAPT_RULE);
-        expect(protocol, "flow:no_stream;" + content, ADAPT_RULE);
-    }
+    expect("tcp", "msg:\"HTTP application traffic\";" + content, ADAPT_RULE);
+    expect("tcp", "app-layer-protocol:http;" + content, DISCARD_RULE);
+    expect("tcp", "http.uri;" + content, DISCARD_RULE);
 
     // existing interval and sticky buffer restrictions are unchanged.
     expect("tcp-pkt", "content:\"ABACATE\";", DISCARD_RULE);

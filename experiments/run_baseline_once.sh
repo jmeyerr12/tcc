@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${1:-transport}" == application ]]; then
+    echo "conjunto application fora do escopo experimental atual; consulte application-rules/README.md" >&2
+    exit 2
+fi
+
 if [[ "${EUID}" -ne 0 ]]; then
-    echo "execute como root: sudo $0 {application|transport|ip} TAXA_MBPS [DURACAO_S] [GERADORES] [THREADS_IDS|auto]" >&2
+    echo "execute como root: sudo $0 {transport|ip} TAXA_MBPS [DURACAO_S] [GERADORES] [THREADS_IDS|auto]" >&2
     exit 1
 fi
 
-RULESET="${1:-application}"
+RULESET="${1:-transport}"
 RATE_MBPS="${2:-500}"
 DURATION_S="${3:-10}"
 GENERATORS="${4:-1}"
@@ -22,17 +27,11 @@ PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 PCAP="${PCAP:-${SCRIPT_DIR}/pcaps/CICIDS2017-Monday-mtu1500.pcap}"
 
 case "${MODE}:${RULESET}" in
-    baseline:application)
-        RULES="${PROJECT_DIR}/application-rules/original-application.rules"
-        ;;
     baseline:transport)
         RULES="${PROJECT_DIR}/transport-rules/original-tcp-udp.rules"
         ;;
     baseline:ip)
         RULES="${PROJECT_DIR}/ip-rules/original-ip.rules"
-        ;;
-    cutter:application)
-        RULES="${PROJECT_DIR}/application-rules/original-application-adapted.rules"
         ;;
     cutter:transport)
         RULES="${PROJECT_DIR}/transport-rules/original-tcp-udp-adapted.rules"

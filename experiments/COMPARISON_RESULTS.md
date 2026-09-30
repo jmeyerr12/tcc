@@ -1,5 +1,11 @@
 # Comparacao controlada — regras de aplicacao
 
+> Registro historico: os resultados de aplicacao abaixo usam o conjunto anterior
+> de oito regras e o intervalo `4-183`. Quatro regras dependentes da identificacao
+> de HTTP/SMB/SSH foram excluidas do escopo suportado; o cenario `application`
+> esta desabilitado. Estes numeros nao validam equivalencia de deteccao nem
+> descrevem o conjunto atual. Veja [situacao do conjunto](../application-rules/README.md).
+
 Resultados de uma repeticao de 10 segundos com o mesmo arquivo
 `CICIDS2017-Monday-mtu1500.pcap` nos quatro casos:
 

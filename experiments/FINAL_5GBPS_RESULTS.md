@@ -1,5 +1,11 @@
 # Consolidacao preliminar a 5 Gbit/s
 
+> Registro historico: os resultados de aplicacao abaixo usam o conjunto anterior
+> de oito regras e o intervalo `4-183`. Quatro regras dependentes da identificacao
+> de HTTP/SMB/SSH foram excluidas do escopo suportado; o cenario `application`
+> esta desabilitado. Estes numeros nao validam equivalencia de deteccao nem
+> descrevem o conjunto atual. Veja [situacao do conjunto](../application-rules/README.md).
+
 Comparacao dos tres conjuntos com o PCAP normalizado, duracao de 10 segundos e
 dois geradores. Os valores abaixo sao de uma repeticao por modo; repeticoes
 adicionais ainda sao necessarias para media, dispersao e intervalo de confianca.
