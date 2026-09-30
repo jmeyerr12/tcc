@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-ALGORITHM = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / "alg"
+ALGORITHM = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / "build/alg"
 
 
 def sids(text):

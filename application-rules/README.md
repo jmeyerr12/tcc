@@ -1,5 +1,8 @@
 # Situacao do conjunto de aplicacao
 
+**Aplicacao continua no objetivo do TCC.** As restricoes abaixo descrevem o
+conjunto e a implementacao atuais, nao a retirada dessa categoria da avaliacao.
+
 O cenario `application` esta desabilitado nos scripts de experimento.
 O algoritmo exclui protocolos de aplicacao no header da regra, mesmo quando
 o conteudo possui uma janela finita no payload bruto: a identificacao do
@@ -21,8 +24,14 @@ O arquivo fonte geral `../suricata.rules` permanece preservado.
 `original-application.rules` e `original-application-adapted.rules` agora
 contem os mesmos quatro SIDs restantes. Tres regras TCP nao inspecionam
 payload. A unica regra UDP com payload, SID 2069043, consulta o flowbit
-`ET.IKE.MS_Sec_VID`, cujo produtor esta ausente. Ela permanece nos arquivos
-para distinguir essa limitacao da exclusao por protocolo de aplicacao.
+`ET.IKE.MS_Sec_VID`, cujo produtor esta ausente. O `flowbit` funciona como uma
+marca na conexao: `set` grava a marca e `isset` exige que ela exista.
+No arquivo fonte `../suricata.rules`, quem a grava e o SID 2069042, ausente
+dos conjuntos selecionados de aplicacao e transporte. Sua segunda busca de
+conteudo nao tem janela finita, fora do escopo atual do adaptador.
+Isso afeta os conjuntos originais e adaptados; nao foi causado pelo corte.
+A regra 2069043 permanece nos arquivos para registrar essa limitacao.
+Referencia: [flowbits no Suricata](https://docs.suricata.io/en/suricata-8.0.1/rules/flow-keywords.html#flowbits).
 
 O summary atual descreve apenas esse conjunto residual: intervalo `16-23`,
 adaptado para `0-7`. Isso nao torna o conjunto apto ao experimento. Nao se

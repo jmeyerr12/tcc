@@ -49,6 +49,11 @@ case "${1:-status}" in
             exit 1
         fi
 
+        if [[ ! -r "${PROJECT_DIR}/build/af_xdp_kern.o" ]]; then
+            echo "objeto XDP ausente; execute make na raiz do projeto" >&2
+            exit 1
+        fi
+
         detach
         # veth recusa XDP nativo quando o MTU do peer exige frames maiores que
         # o buffer XDP. O PCAP do experimento ja foi normalizado para MTU 1500.
@@ -59,7 +64,7 @@ case "${1:-status}" in
         mkdir -p "${MAP_DIR}"
 
         bpftool prog load \
-            "${PROJECT_DIR}/af_xdp_kern.o" \
+            "${PROJECT_DIR}/build/af_xdp_kern.o" \
             "${PROGRAM_PIN}" \
             type xdp \
             pinmaps "${MAP_DIR}"

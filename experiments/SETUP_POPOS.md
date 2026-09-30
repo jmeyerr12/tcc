@@ -109,7 +109,7 @@ cd /home/meyer/d/tcc
 chmod +x experiments/*.sh
 make clean
 make -j"$(nproc)"
-ls -lh alg af_xdp_kern.o
+ls -lh build/alg build/af_xdp_kern.o
 ```
 
 ## 5. Validar o XDP antes do experimento

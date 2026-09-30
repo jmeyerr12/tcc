@@ -1,5 +1,13 @@
+# Compilacao e caches locais.
+/build/
+/alg
+*.o
+__pycache__/
+*.py[cod]
 a.out
-*.
+/output_packet.bin
+/suricata-adapted.rules
+/suricata-summary.txt
 
 # Artefatos locais dos experimentos. Os scripts e relatorios em experiments/
 # permanecem versionados.

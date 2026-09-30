@@ -4,7 +4,7 @@
 > de oito regras e o intervalo `4-183`. Quatro regras dependentes da identificacao
 > de HTTP/SMB/SSH foram excluidas do escopo suportado; o cenario `application`
 > esta desabilitado. Estes numeros nao validam equivalencia de deteccao nem
-> descrevem o conjunto atual. Veja [situacao do conjunto](../application-rules/README.md).
+> descrevem o conjunto atual. Veja [situacao do conjunto](../../application-rules/README.md).
 
 ## Objetivo
 
