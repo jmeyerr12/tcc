@@ -66,15 +66,6 @@ Também são excluídos `pcre`, `byte_test`, `byte_jump`, `byte_extract`, `byte_
 
 ## Limitações
 
-Aceitação pelo algoritmo não comprova equivalência de detecção. O corte pode
-alterar campos observados pelas regras, remontagem de fluxos e dependências.
-Por exemplo, a SID 2069043 de transporte depende do produtor de flowbit
-2069042, rejeitado pelo algoritmo.
-
-O grupo IP não exige payload bruto nesta base. Seu summary indica `(nenhum)`;
-os executores conservam o byte zero, pois um mapa sem intervalos desativa o
-corte. Isso explica a redução do PCAP mesmo sem regras IP adaptadas.
-
 O BPF aceita até 16 intervalos e payload de até 2048 bytes. Casos não suportados
 podem passar sem corte, o que precisa ser compatibilizado com as regras adaptadas.
 Veja as [condições dos experimentos](../experiments/README.md) e os
