@@ -18,6 +18,13 @@ static bool isNetworkTransportProtocol(const string& protocol) {
            protocol == "pkthdr";
 }
 
+static string applicationTransport(const string& protocol) {
+    if (protocol == "http" || protocol == "ssh" || protocol == "smb") {
+        return "tcp";
+    }
+    return "";
+}
+
 static bool isHeaderBuffer(const string& key) {
     return key == "tcp.hdr" || key == "udp.hdr" ||
            key == "ipv4.hdr" || key == "ipv6.hdr" ||
@@ -59,7 +66,32 @@ static bool isUnsupportedPayloadOperation(const string& key) {
 
 static bool isUnsupportedSemantic(const string& key) {
     return key == "dsize" || key == "stream_size" || key == "stream-event" ||
-           key == "app-layer-event" || key == "app-layer-protocol";
+           key == "app-layer-event" || key == "app-layer-protocol" ||
+           key == "ipv4-csum" || key == "tcpv4-csum" ||
+           key == "udpv4-csum" || key == "tcpv6-csum" ||
+           key == "udpv6-csum";
+}
+
+static bool flowHasFlag(const string& option, const string& expected) {
+    size_t colon = option.find(':');
+    if (colon == string::npos) return false;
+
+    string values = option.substr(colon + 1);
+    size_t start = 0;
+
+    while (start <= values.size()) {
+        size_t comma = values.find(',', start);
+        string value = values.substr(
+            start,
+            comma == string::npos ? string::npos : comma - start
+        );
+
+        if (lowerCopy(trim(value)) == expected) return true;
+        if (comma == string::npos) break;
+        start = comma + 1;
+    }
+
+    return false;
 }
 
 // algorithm logic
@@ -90,10 +122,10 @@ RuleAnalysis analyzeRule(const string& line) {
     }
 
     string protocol = getRuleProtocol(line);
+    string transport = applicationTransport(protocol);
+    bool applicationProtocol = !transport.empty();
 
-    // Application identification can depend on bytes outside the explicit
-    // content windows. Only network/transport protocols are in scope.
-    if (!isNetworkTransportProtocol(protocol)) {
+    if (!isNetworkTransportProtocol(protocol) && !applicationProtocol) {
         return result;
     }
 
@@ -106,6 +138,11 @@ RuleAnalysis analyzeRule(const string& line) {
     // collect content constraints and reject unsupported options
     for (size_t i = 0; i < tokens.size(); ++i) {
         const string& key = tokens[i].key;
+
+        if (applicationProtocol && transport == "tcp" && key == "flow" &&
+            flowHasFlag(tokens[i].text, "only_stream")) {
+            return result;
+        }
 
         if (isHeaderBuffer(key)) {
             currentBuffer = PACKET_HEADER;
@@ -313,7 +350,15 @@ RuleAnalysis analyzeRule(const string& line) {
     // negated-only inspection still requires a nonempty packet payload.
     if (usesPayload && !positivePayload) result.intervals.push_back(Interval{0, 0});
 
+    // Replacing an application protocol by TCP/UDP is safe only for a rule
+    // whose complete inspection is represented by finite raw-payload windows.
+    // Header-only application rules would otherwise become much broader.
+    if (applicationProtocol && !usesPayload) {
+        return RuleAnalysis();
+    }
+
     result.action = usesPayload ? ADAPT_RULE : KEEP_RULE;
+    if (applicationProtocol) result.replacementProtocol = transport;
     return result;
 }
 
@@ -408,12 +453,45 @@ static string replaceOffsetToken(const string& tokenText, long long newOffset) {
            to_string(newOffset) + match.suffix().str();
 }
 
+static string replaceRuleProtocol(const string& line, const string& protocol) {
+    if (protocol.empty()) return line;
+
+    static const regex pattern(
+        "^\\s*(?:alert|log|pass|drop|reject|sdrop)\\s+([^\\s]+)",
+        regex_constants::icase
+    );
+    smatch match;
+    if (!regex_search(line, match, pattern)) return line;
+
+    string output = line;
+    output.replace((size_t)match.position(1), (size_t)match.length(1), protocol);
+    return output;
+}
+
+static string requirePacketInspection(const string& options) {
+    vector<Token> tokens = tokenizeOptions(options);
+
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (tokens[i].key != "flow") continue;
+        if (flowHasFlag(tokens[i].text, "no_stream")) return options;
+
+        string replacement = tokens[i].text;
+        size_t end = replacement.find_last_not_of(" \t\r\n");
+        replacement.insert(end == string::npos ? 0 : end + 1, ",no_stream");
+
+        return options.substr(0, tokens[i].start) + replacement +
+               options.substr(tokens[i].end);
+    }
+
+    return "flow:no_stream; " + options;
+}
+
 string adaptRule(
     const string& line,
     const RuleAnalysis& analysis,
     const vector<Interval>& cuts
 ) {
-    if (analysis.action != ADAPT_RULE || analysis.offsetTokens.empty()) {
+    if (analysis.action != ADAPT_RULE) {
         return line;
     }
 
@@ -447,5 +525,13 @@ string adaptRule(
 
     newOptions += options.substr(cursor);
 
-    return line.substr(0, openPos + 1) + newOptions + line.substr(closePos);
+    // A plain TCP content rule can run once on the packet and again on the
+    // reassembled stream. Converted application rules must inspect only the
+    // packet whose payload the cutter actually compacted.
+    if (analysis.replacementProtocol == "tcp") {
+        newOptions = requirePacketInspection(newOptions);
+    }
+
+    string adapted = line.substr(0, openPos + 1) + newOptions + line.substr(closePos);
+    return replaceRuleProtocol(adapted, analysis.replacementProtocol);
 }

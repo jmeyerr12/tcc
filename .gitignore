@@ -1,5 +1,6 @@
 # Compilacao e caches locais.
 /build/
+/analisador/build/
 /alg
 *.o
 __pycache__/
@@ -13,4 +14,3 @@ a.out
 # permanecem versionados.
 experiments/results/
 experiments/pcaps/*
-!experiments/pcaps/README.md

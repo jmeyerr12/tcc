@@ -8,5 +8,5 @@ As referencias a `results/` nos relatorios apontam para `experiments/results/`
 na raiz do projeto; os dados brutos e PCAPs locais foram mantidos nesse local.
 
 Para trabalhar no projeto, comece pelo [README atual](../README.md) e pelos
-[proximos passos](../PROXIMOS_PASSOS.md). Os resultados de aplicacao anteriores
+[resultados atuais](../docs/RESULTADOS_EXPERIMENTOS.md). Os resultados de aplicacao anteriores
 a exclusao das regras HTTP/SMB/SSH nao comprovam equivalencia de deteccao.

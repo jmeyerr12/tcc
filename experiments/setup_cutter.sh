@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "${1:-status}" == on && "${2:-}" == application ]]; then
-    echo "conjunto application fora do escopo experimental atual; consulte application-rules/README.md" >&2
-    exit 2
-fi
-
 if [[ "${EUID}" -ne 0 ]]; then
     echo "execute como root: sudo $0 {on RULESET|off|status}" >&2
     exit 1
@@ -28,13 +23,25 @@ case "${1:-status}" in
     on)
         RULESET="${2:-}"
         case "${RULESET}" in
-            transport) INTERVALS=(0-313 500-1363) ;;
-            ip) INTERVALS=(21-36) ;;
+            application|transport|ip) ;;
             *)
-                echo "conjunto desconhecido: ${RULESET}; use transport ou ip" >&2
+                echo "conjunto desconhecido: ${RULESET}; use application, transport ou ip" >&2
                 exit 2
                 ;;
         esac
+
+        # Read regenerated group intervals; never reuse a pilot's constants.
+        interval_text="$(python3 - "${PROJECT_DIR}" "${RULESET}" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from run_intervals import summary_intervals
+path = Path(sys.argv[1]) / (sys.argv[2] + '-rules') / 'summary.txt'
+for start, end in summary_intervals(path):
+    print(f'{start}-{end}')
+PY
+        )"
+        mapfile -t INTERVALS <<< "${interval_text}"
 
         if ! ip link show dev "${IDS_IF}" >/dev/null 2>&1; then
             echo "interface ausente: ${IDS_IF}; execute setup_veth.sh up" >&2
@@ -86,7 +93,7 @@ case "${1:-status}" in
         fi
         ;;
     *)
-        echo "uso: sudo $0 {on transport|on ip|off|status}" >&2
+        echo "uso: sudo $0 {on application|on transport|on ip|off|status}" >&2
         exit 2
         ;;
 esac

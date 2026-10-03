@@ -91,20 +91,44 @@ int main() {
     expect("udp", "flow:stateless,to_server;" + content, ADAPT_RULE);
     expect("udp", "flow:only_stream;" + content, ADAPT_RULE);
 
-    // Finite raw content does not preserve application protocol identification.
-    for (const string protocol : {"http", "http1", "http2", "ssh", "smb",
-                                 "tls", "ssl", "ftp", "ftp-data", "smtp",
-                                 "dns", "quic", "snmp", "ntp", "dhcp", "ike",
-                                 "bittorrent-dht", "krb5", "sip", "nfs", "dcerpc",
-                                 "mqtt", "modbus", "pgsql", "rdp", "rfb", "telnet",
-                                 "HTTP", "unknown-application"}) {
-        expect(protocol, content, DISCARD_RULE);
-        expect(protocol, "flow:established,to_server;" + content, DISCARD_RULE);
-        expect(protocol, "flow:no_stream;" + content, DISCARD_RULE);
-        expect(protocol, "flow:only_stream; tcp.flags:A;" + content, DISCARD_RULE);
-        expect(protocol, "pkt_data;" + content, DISCARD_RULE);
-        expect(protocol, "tcp.hdr; content:\"|00 50|\"; offset:2; depth:2;", DISCARD_RULE);
+    // Checksum fields are intentionally preserved instead of recalculated by
+    // the cutter, so rules that validate them must not reach the adapted set.
+    for (const string option : {"ipv4-csum:invalid;", "tcpv4-csum:invalid;",
+                                "udpv4-csum:invalid;", "tcpv6-csum:invalid;",
+                                "udpv6-csum:invalid;"}) {
+        expect("ip", option, DISCARD_RULE);
+    }
+
+    // The application protocols used by the selected rules are rewritten to
+    // TCP when all payload inspection has finite raw windows.
+    for (const string protocol : {"http", "ssh", "smb", "HTTP"}) {
+        RuleAnalysis application = analyzeRule(rule(protocol, content));
+        check(application.action == ADAPT_RULE &&
+              application.replacementProtocol == "tcp", protocol + " vira tcp");
+        check(adaptRule(rule(protocol, content), application,
+                        getCuts(mergeIntervals(application.intervals))) ==
+              rule("tcp", "flow:no_stream; content:\"ABACATE\"; offset:0; depth:100;"),
+              protocol + " adaptado como tcp");
+        expect(protocol, "http.uri;" + content, DISCARD_RULE);
         expect(protocol, "flow:established;", DISCARD_RULE);
+        expect(protocol, "flow:only_stream;" + content, DISCARD_RULE);
+    }
+
+    RuleAnalysis applicationFlow = analyzeRule(rule(
+        "http", "flow:established,to_server;" + content
+    ));
+    check(adaptRule(rule("http", "flow:established,to_server;" + content),
+                    applicationFlow,
+                    getCuts(mergeIntervals(applicationFlow.intervals))) ==
+          rule("tcp", "flow:established,to_server,no_stream;content:\"ABACATE\"; offset:0; depth:100;"),
+          "conversao TCP limita a inspecao ao pacote");
+    // Other application headers are outside the selected and validated scope.
+    for (const string protocol : {"http1", "http2", "tls", "ssl", "smtp",
+                                 "ftp", "ftp-data", "mqtt", "modbus", "pgsql",
+                                 "rdp", "rfb", "telnet", "quic", "snmp", "ntp",
+                                 "dhcp", "ike", "bittorrent-dht", "dns", "krb5",
+                                 "sip", "nfs", "dcerpc", "unknown-application"}) {
+        expect(protocol, content, DISCARD_RULE);
     }
     expect("tcp", "msg:\"HTTP application traffic\";" + content, ADAPT_RULE);
     expect("tcp", "app-layer-protocol:http;" + content, DISCARD_RULE);

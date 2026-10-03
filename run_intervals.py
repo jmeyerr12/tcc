@@ -15,6 +15,19 @@ MAX_INTERVALS = 16
 MAX_PAYLOAD_BYTES = 2048
 
 
+def summary_intervals(path):
+    section = Path(path).read_text().split('Merged:\n', 1)[1].split('\n\n', 1)[0]
+    # Zero intervals disables XDP cutting. Keep one byte conservatively when
+    # the adapter requires no payload, instead of disabling the cutter.
+    if section.strip() == '(nenhum)':
+        return [(0, 0)]
+    intervals = [parse_interval(line) for line in section.splitlines()]
+    if not intervals:
+        raise ValueError('summary has no Merged entries')
+    validate_intervals(intervals)
+    return intervals
+
+
 def parse_interval(text):
     try:
         start_text, end_text = text.split("-", 1)

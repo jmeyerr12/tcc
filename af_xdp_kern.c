@@ -11,8 +11,6 @@
 #define MAX_INTERVALS 16
 #define MAX_PAYLOAD_BYTES 2048
 #define BLOCK_BYTES 256
-#define MAX_SUM_BYTES (MAX_PAYLOAD_BYTES + 60)
-#define MAX_SUM_BLOCKS ((MAX_SUM_BYTES + BLOCK_BYTES - 1) / BLOCK_BYTES)
 #define MAX_COPY_BLOCKS ((MAX_PAYLOAD_BYTES + BLOCK_BYTES - 1) / BLOCK_BYTES)
 
 struct interval {
@@ -38,105 +36,6 @@ struct {
 static long (* const loop)(__u32, void *, void *, __u64) = (void *)181;
 static long (* const load)(struct xdp_md *, __u32, void *, __u32) = (void *)189;
 static long (* const store)(struct xdp_md *, __u32, const void *, __u32) = (void *)190;
-
-struct sum_ctx {
-    struct xdp_md *xdp;
-    __u32 offset, length, sum;
-    int error;
-};
-
-/* Soma em ordem de rede. O bloco e zerado antes da leitura, portanto os bytes
- * de padding do ultimo bloco nao alteram o checksum. bpf_csum_diff processa o
- * bloco inteiro no kernel e evita dezenas de instrucoes BPF por callback.
- */
-static long sum_block(__u32 i, void *opaque)
-{
-    struct sum_ctx *s = opaque;
-    __u8 bytes[BLOCK_BYTES] = {};
-    __u32 pos;
-    __u32 size;
-
-    /* O verifier analisa o callback separadamente e precisa deste limite
-     * explicito antes de aceitar length - pos como tamanho de helper. O AND
-     * tambem descarta os bits superiores desconhecidos do registrador que o
-     * Clang reutiliza para o argumento __u32 do callback.
-     */
-    i &= 63;
-    if (i >= MAX_SUM_BLOCKS) {
-        s->error = 1;
-        return 1;
-    }
-    pos = i * BLOCK_BYTES;
-    if (pos >= s->length) return 1;
-    size = s->length - pos;
-    if (size > BLOCK_BYTES) size = BLOCK_BYTES;
-    /* Mantem 1..64 inalterado e torna o limite assinado evidente ao verifier. */
-    asm volatile("" : "+r"(size));
-    size &= (BLOCK_BYTES * 2 - 1);
-    if (!size || size > BLOCK_BYTES) {
-        s->error = 1;
-        return 1;
-    }
-    if (load(s->xdp, s->offset + pos, bytes, size) < 0) {
-        s->error = 1;
-        return 1;
-    }
-
-    __s64 result = bpf_csum_diff(0, 0, (__be32 *)bytes,
-                                 sizeof(bytes), s->sum);
-    if (result < 0) {
-        s->error = 1;
-        return 1;
-    }
-    s->sum = (__u32)result;
-    return 0;
-}
-
-/* Evita bpf_loop quando todo o checksum cabe em um bloco. E o caminho usado
- * pelos headers IP e pelo segmento TCP/UDP cortado das regras de aplicacao.
- */
-static __noinline int sum_once(struct sum_ctx *s)
-{
-    __u8 bytes[BLOCK_BYTES] = {};
-    __u32 size = s->length;
-
-    asm volatile("" : "+r"(size));
-    size &= (BLOCK_BYTES * 2 - 1);
-    if (!size || size > BLOCK_BYTES)
-        return -1;
-    if (load(s->xdp, s->offset, bytes, size) < 0)
-        return -1;
-
-    __s64 result = bpf_csum_diff(0, 0, (__be32 *)bytes,
-                                 sizeof(bytes), s->sum);
-    if (result < 0)
-        return -1;
-    s->sum = (__u32)result;
-    return 0;
-}
-
-static __always_inline int packet_sum(struct xdp_md *ctx, __u32 offset,
-                                      __u32 length, __u32 *sum)
-{
-    if (!length) return 0;
-    if (length > MAX_SUM_BYTES) return -1;
-    struct sum_ctx s = { .xdp = ctx, .offset = offset, .length = length, .sum = *sum };
-    if (length <= BLOCK_BYTES) {
-        if (sum_once(&s) < 0) return -1;
-    } else if (loop((length + BLOCK_BYTES - 1) / BLOCK_BYTES,
-                    sum_block, &s, 0) < 0 || s.error) {
-        return -1;
-    }
-    *sum = s.sum;
-    return 0;
-}
-
-static __always_inline __u16 fold(__u32 sum)
-{
-    sum = (sum & 0xffff) + (sum >> 16);
-    sum = (sum & 0xffff) + (sum >> 16);
-    return (__u16)~sum;
-}
 
 struct copy_ctx {
     struct xdp_md *xdp;
@@ -350,7 +249,6 @@ int xdp_ids_func(struct xdp_md *ctx)
         return XDP_PASS;
 
     __u32 iphlen, iplen, protocol;
-    __be32 pseudo_words[10] = {};
     if (type == ETH_P_IP) {
         struct iphdr ip;
         if (load(ctx, ipoff, &ip, sizeof(ip)) < 0 || ip.version != 4 || ip.ihl < 5)
@@ -360,8 +258,6 @@ int xdp_ids_func(struct xdp_md *ctx)
         if (iplen < iphlen || (bpf_ntohs(ip.frag_off) & 0x3fff))
             return XDP_PASS;
         protocol = ip.protocol;
-        pseudo_words[0] = ip.saddr;
-        pseudo_words[1] = ip.daddr;
     } else {
         struct ipv6hdr ip;
         if (load(ctx, ipoff, &ip, sizeof(ip)) < 0 || ip.version != 6)
@@ -373,11 +269,6 @@ int xdp_ids_func(struct xdp_md *ctx)
         if (protocol == 0 || protocol == 43 || protocol == 44 || protocol == 50 ||
             protocol == 51 || protocol == 60 || protocol == 135 || protocol == 139 || protocol == 140)
             return XDP_PASS;
-        #pragma clang loop unroll(full)
-        for (int i = 0; i < 4; ++i) {
-            pseudo_words[i] = ip.saddr.s6_addr32[i];
-            pseudo_words[4 + i] = ip.daddr.s6_addr32[i];
-        }
     }
     if (ipoff + iplen > frame_len)
         return XDP_PASS;
@@ -385,20 +276,18 @@ int xdp_ids_func(struct xdp_md *ctx)
     if (protocol != IPPROTO_TCP && protocol != IPPROTO_UDP)
         return XDP_PASS;
 
-    __u32 l4off = ipoff + iphlen, l4len = iplen - iphlen, l4hlen, csumoff;
+    __u32 l4off = ipoff + iphlen, l4len = iplen - iphlen, l4hlen;
     if (protocol == IPPROTO_TCP) {
         struct tcphdr tcp;
         if (l4len < sizeof(tcp) || load(ctx, l4off, &tcp, sizeof(tcp)) < 0 || tcp.doff < 5)
             return XDP_PASS;
         l4hlen = tcp.doff * 4;
-        csumoff = l4off + 16;
     } else {
         struct udphdr udp;
         if (l4len < sizeof(udp) || load(ctx, l4off, &udp, sizeof(udp)) < 0 ||
             bpf_ntohs(udp.len) != l4len)
             return XDP_PASS;
         l4hlen = sizeof(udp);
-        csumoff = l4off + 6;
     }
     if (l4len < l4hlen || l4len - l4hlen > MAX_PAYLOAD_BYTES)
         return XDP_PASS;
@@ -413,7 +302,7 @@ int xdp_ids_func(struct xdp_md *ctx)
         kept = compact_payload(ctx, l4off + l4hlen, payloadlen, count);
     if (kept < 0 || (__u32)kept > payloadlen)
         return XDP_ABORTED;
-    /* Sem corte, preserve inclusive checksums originais invalidos e padding. */
+    /* Sem corte, preserve todos os campos e o padding originais. */
     if ((__u32)kept == payloadlen) return XDP_PASS;
     __u32 newl4len = l4hlen + (__u32)kept;
     __u32 newframe = l4off + newl4len;
@@ -424,13 +313,6 @@ int xdp_ids_func(struct xdp_md *ctx)
     if (type == ETH_P_IP) {
         value = bpf_htons((__u16)(iphlen + newl4len));
         if (store(ctx, ipoff + 2, &value, 2) < 0) return XDP_ABORTED;
-        value = 0;
-        if (store(ctx, ipoff + 10, &value, 2) < 0) return XDP_ABORTED;
-        __u32 sum = 0;
-        if (packet_sum(ctx, ipoff, iphlen, &sum) < 0) return XDP_ABORTED;
-        /* bpf_csum_diff e fold produzem __sum16 pronto para ser armazenado. */
-        value = fold(sum);
-        if (store(ctx, ipoff + 10, &value, 2) < 0) return XDP_ABORTED;
     } else {
         value = bpf_htons((__u16)newl4len);
         if (store(ctx, ipoff + 4, &value, 2) < 0) return XDP_ABORTED;
@@ -439,24 +321,8 @@ int xdp_ids_func(struct xdp_md *ctx)
         value = bpf_htons((__u16)newl4len);
         if (store(ctx, l4off + 4, &value, 2) < 0) return XDP_ABORTED;
     }
-    value = 0;
-    if (store(ctx, csumoff, &value, 2) < 0) return XDP_ABORTED;
-    __s64 pseudo_sum;
-    if (type == ETH_P_IP) {
-        pseudo_words[2] = bpf_htonl((protocol << 16) | newl4len);
-        pseudo_sum = bpf_csum_diff(0, 0, pseudo_words, 12, 0);
-    } else {
-        pseudo_words[8] = bpf_htonl(newl4len);
-        pseudo_words[9] = bpf_htonl(protocol);
-        pseudo_sum = bpf_csum_diff(0, 0, pseudo_words, 40, 0);
-    }
-    if (pseudo_sum < 0) return XDP_ABORTED;
-    __u32 sum = (__u32)pseudo_sum;
-    if (packet_sum(ctx, l4off, newl4len, &sum) < 0) return XDP_ABORTED;
-    __u16 result = fold(sum);
-    if (protocol == IPPROTO_UDP && !result) result = 0xffff;
-    value = result;
-    if (store(ctx, csumoff, &value, 2) < 0) return XDP_ABORTED;
+    /* Os checksums permanecem com o valor recebido. As regras que os avaliam
+     * foram retiradas, e os experimentos executam o Suricata com -k none. */
     return XDP_PASS;
 }
 

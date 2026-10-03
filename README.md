@@ -1,42 +1,42 @@
-# Adaptação de regras e corte de pacotes para o Suricata
+# Adaptação de regras e corte de pacotes
 
-O foco do projeto e o algoritmo que adapta o conjunto de regras: calcula os
-intervalos a conservar e reajusta os offsets para o Suricata. O cortador XDP
-executa a compactacao do payload de cada pacote conforme esses intervalos.
+O foco do TCC é o algoritmo que seleciona regras compatíveis, calcula os
+intervalos de payload a preservar e adapta os offsets. O cortador BPF executa
+o corte usado nos experimentos com Suricata.
 
-O objetivo e comparar **sem e com cortador**, usando um PCAP generico de
-Internet, os grupos de regras **aplicacao, transporte e rede/IP** e as taxas
-de **500 Mb/s, 1, 2, 5 e 10 Gb/s**.
+## Começar
 
-## Compilar e verificar
+Execute na raiz de `tcc`:
 
 ```bash
-make
+make alg
+./build/alg transport-rules/original-tcp-udp.rules build/transport-adapted.rules \
+  > build/transport-summary.txt
 make test
 ```
 
-Executaveis e objetos ficam em `build/`. Para adaptar um conjunto:
+O executável fica em **`build/alg`**. O código e os auxiliares do analisador
+ficam em `analisador/`; `make -C analisador` compila somente nessa pasta.
+`make clean` remove os diretórios de compilação.
 
-```bash
-./build/alg transport-rules/original-tcp-udp.rules build/transport-adapted.rules \
-  > build/transport-summary.txt
-```
+## Organização
 
-## Onde encontrar
+| Local | Conteúdo |
+|---|---|
+| [analisador/](analisador/README.md) | Algoritmo, escopo, geração dos grupos e testes |
+| [experiments/](experiments/README.md) | Preparação dos PCAPs e execução dos experimentos |
+| [tests/](tests/README.md) | Validação de replay, corte e alertas |
+| [Resultados](docs/RESULTADOS_EXPERIMENTOS.md) | Tabelas por carga, método e fontes das medições |
+| `application-rules/`, `transport-rules/`, `ip-rules/` | Regras originais, adaptadas e intervalos de cada grupo |
+| `af_xdp_kern.c`, `xdp/`, `run_intervals.py` | Cortador BPF e configuração dos intervalos |
+| `experiments/pcaps/`, `experiments/results/` | Capturas e resultados locais, fora do Git |
+| `archive/` | Material histórico e referências para consulta |
 
-- [Proximos passos](PROXIMOS_PASSOS.md): plano da rodada experimental.
-- [Resumo para a reuniao](docs/REUNIAO_PROFESSOR.md): resultados e decisoes.
-- [Experimentos](experiments/SETUP_POPOS.md): ambiente e comandos de execucao.
-- [Testes](tests/README.md): verificacao de intervalos e teste com o Suricata.
-- [Escopo](docs/escopo-algoritmo.md): regras aceitas e limites atuais.
-- [Problemas do corte](docs/LIMITACOES_DO_CORTE.md): efeitos sobre a deteccao,
-  limites do executor e implicacoes para o adaptador.
-- `application-rules/`, `transport-rules/`, `ip-rules/`: regras e summaries.
-- `experiments/pcaps/` e `experiments/results/`: capturas e resultados locais.
-- `archive/`: relatorios, rascunhos e artefatos antigos, apenas para consulta.
+`make rule-groups` regenera os três conjuntos a partir de `suricata.rules`.
+Inclui todas as regras aceitas, mesmo as mantidas sem alteração. A base atual
+tem 1.535 aceitas: 4 de aplicação, 1.005 de transporte e 526 de rede/IP.
+Ao mudar as regras ou os intervalos, regenere os PCAPs e repita as medições.
 
-**Etapa atual:** fechar as condicoes de uso do adaptador e realizar os
-experimentos com os tres grupos, aproveitando os pilotos existentes.
-Aplicacao continua no objetivo; seu cenario atual esta bloqueado nos scripts
-enquanto o conjunto e suas dependencias precisam ser revistos. O escopo
-implementado e as limitacoes conhecidas delimitam as conclusoes.
+Os próximos passos são compartilhar os artefatos com o professor e o Herbele,
+validar o uso no Snort e avançar na escrita: algoritmo, metodologia, resultados
+e limitações. Repositório: <https://github.com/jmeyerr12/tcc>.

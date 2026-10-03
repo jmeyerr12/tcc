@@ -65,6 +65,7 @@ struct RuleAnalysis {
     RuleAction action;
     std::vector<Interval> intervals;
     std::vector<std::size_t> offsetTokens;
+    std::string replacementProtocol;
 
     RuleAnalysis() : action(DISCARD_RULE) {}
 };

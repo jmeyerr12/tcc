@@ -26,6 +26,9 @@ int main(int argc,char** argv){try{
         if(line=="Merged:"){merged=true;continue;}
         if(!merged)continue;
         if(line.empty())break;
+        // Zero map entries disable XDP. Preserve one byte conservatively for
+        // groups whose rules do not inspect raw payload.
+        if(line=="(nenhum)") { intervals.push_back({{0,0}}); continue; }
         long long start,end;char dash;std::istringstream row(line);
         check(bool(row>>start>>dash>>end) && dash=='-' && (row>>std::ws).eof(),"invalid merged interval");
         check(start>=0 && end>=start && end<2048 && intervals.size()<16,"interval outside xdp limits");
@@ -53,29 +56,40 @@ int main(int argc,char** argv){try{
         check(!(be16(p,20)&0x3fff),"fragmented input is outside this test");
         size_t l4= p[23]==6?size_t(p[46]>>4)*4:8;
         check(p[23]!=6 || l4>=20,"invalid tcp header size");
-        size_t off=34+l4;check(off<=p.size() && be16(p,16)+14u==p.size(),"invalid lengths");
-        check(p.size()-off<=2048,"payload exceeds xdp limit");
-        check(p[23]!=17 || be16(p,38)==p.size()-34,"invalid input udp length");
-        check(valid(sum(p,14,34)) && valid(sum(p,26,34)+p[23]+p.size()-34+sum(p,34,p.size())),"bad input checksum");
-        Bytes expected;for(auto& r:intervals)for(size_t j=r[0];j<=r[1] && off+j<p.size();++j)expected.push_back(p[off+j]);
+        size_t off=34+l4,ipEnd=14u+be16(p,16);
+        check(off<=ipEnd && ipEnd<=p.size(),"invalid lengths");
+        check(ipEnd-off<=2048,"payload exceeds xdp limit");
+        check(p[23]!=17 || be16(p,38)==ipEnd-34,"invalid input udp length");
+        bool l4ChecksumValid = p[23]==17 && be16(p,40)==0;
+        l4ChecksumValid = l4ChecksumValid ||
+            valid(sum(p,26,34)+p[23]+ipEnd-34+sum(p,34,ipEnd));
+        check(valid(sum(p,14,34)) && l4ChecksumValid,"bad input checksum");
+        Bytes expected;for(auto& r:intervals)for(size_t j=r[0];j<=r[1] && off+j<ipEnd;++j)expected.push_back(p[off+j]);
+        bool shortened=expected.size()<ipEnd-off;
         bpf_prog_test_run_attr test={};test.prog_fd=bpf_program__fd(prog);test.repeat=1;
         test.data_in=p.data();test.data_size_in=p.size();test.data_out=q.data();test.data_size_out=q.size();
         check(bpf_prog_test_run_xattr(&test)==0,"bpf test run");check(test.retval==2,"xdp did not pass packet");q.resize(test.data_size_out);
-        check(q.size()==off+expected.size(),"wrong output size");check(std::equal(expected.begin(),expected.end(),q.begin()+off),"wrong output payload");
+        size_t expectedSize=shortened?off+expected.size():p.size();
+        check(q.size()==expectedSize,"wrong output size");check(std::equal(expected.begin(),expected.end(),q.begin()+off),"wrong output payload");
+        if(!shortened)check(p==q,"packet without cut changed");
         for(size_t i=0;i<off;++i) {
-            bool updated=i==16 || i==17 || i==24 || i==25 ||
-                         (p[23]==6 ? i==50 || i==51 : i>=38 && i<=41);
+            bool updated=i==16 || i==17 || (p[23]==17 && (i==38 || i==39));
             check(updated || p[i]==q[i],"unexpected header change");
         }
         check(std::equal(p.begin(),p.begin()+14,q.begin()),"ethernet header changed");
         check(std::equal(p.begin()+26,p.begin()+38,q.begin()+26),"addresses/ports changed");
-        if(p[23]==6)check(std::equal(p.begin()+38,p.begin()+50,q.begin()+38),"tcp sequence/ack/flags/window changed");
-        else check(be16(q,38)==q.size()-34,"udp length mismatch");
-        check(be16(q,16)+14u==q.size(),"ip length mismatch");
-        check(valid(sum(q,14,34)) && valid(sum(q,26,34)+q[23]+q.size()-34+sum(q,34,q.size())),"bad output checksum");
+        check(be16(p,24)==be16(q,24),"ip checksum changed");
+        if(p[23]==6){
+            check(std::equal(p.begin()+38,p.begin()+50,q.begin()+38),"tcp sequence/ack/flags/window changed");
+            check(be16(p,50)==be16(q,50),"tcp checksum changed");
+        }else{
+            check(be16(q,38)==be16(q,16)-20,"udp length mismatch");
+            check(be16(p,40)==be16(q,40),"udp checksum changed");
+        }
+        check(be16(q,16)+14u==(shortened?q.size():ipEnd),"ip length mismatch");
         h[2]=h[3]=q.size();out.write((char*)h,16);out.write((char*)q.data(),q.size());check(bool(out),"pcap write");
         ++packets;bytesIn+=p.size();bytesOut+=q.size();
     }
     check(packets>0,"empty pcap: no packet tested");
-    bpf_object__close(obj);std::cout<<"PASS: "<<packets<<" packets, "<<bytesIn<<" -> "<<bytesOut<<" bytes; payload, lengths, headers and checksums verified\n";
+    bpf_object__close(obj);std::cout<<"PASS: "<<packets<<" packets, "<<bytesIn<<" -> "<<bytesOut<<" bytes; payload, lengths, headers and checksum fields verified\n";
 }catch(const std::exception& e){std::cerr<<"FAIL: "<<e.what()<<'\n';return 1;}}

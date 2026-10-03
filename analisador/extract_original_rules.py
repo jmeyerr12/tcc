@@ -40,87 +40,34 @@ def load_adapted_sids(filename):
     return sids
 
 
+NETWORK_PROTOCOLS = {"ip", "ipv6", "icmp", "icmpv6", "pkthdr"}
+TRANSPORT_PROTOCOLS = {"tcp", "udp", "tcp-pkt", "tcp-stream", "sctp"}
+APPLICATION_PROTOCOLS = {
+    "http", "http1", "http2", "dns", "tls", "ssl", "smtp", "ftp", "ftp-data",
+    "ssh", "smb", "dcerpc", "krb5", "mqtt", "modbus", "pgsql", "rdp", "snmp",
+    "sip", "rfb", "nfs", "ike", "quic", "ntp", "dhcp", "telnet",
+}
+
+
+def classify_rule(rule):
+    """Classify the original header, before application-to-TCP adaptation."""
+    protocol = get_protocol(rule)
+    if protocol in NETWORK_PROTOCOLS:
+        return "ip"
+    if protocol in TRANSPORT_PROTOCOLS:
+        return "transport"
+    if protocol in APPLICATION_PROTOCOLS:
+        return "application"
+    raise ValueError(f"protocol without a group: {protocol!r}")
+
+
 def matches_mode(rule, mode):
-    if mode in ("ip", "ipv4ipv6"):
-        return "IPv4" in rule or "IPv6" in rule
+    mode = {"ipv4ipv6": "ip", "tcpudp": "transport"}.get(mode, mode)
+    return classify_rule(rule) == mode
 
-    if mode in ("transport", "tcpudp"):
-        protocol = get_protocol(rule)
-        return protocol in ("tcp", "udp")
-    
-    if mode == "application":
-        return is_application_rule(rule)
-
-    return False
 
 def is_application_rule(rule):
-    protocol = get_protocol(rule)
-    lower = rule.lower()
-
-    application_protocols = {
-        "http",
-        "http1",
-        "http2",
-        "dns",
-        "tls",
-        "ssl",
-        "smtp",
-        "ftp",
-        "ftp-data",
-        "ssh",
-        "smb",
-        "dcerpc",
-        "krb5",
-        "mqtt",
-        "modbus",
-        "pgsql",
-        "rdp",
-        "snmp",
-        "sip",
-        "rfb",
-        "nfs",
-        "ike",
-        "quic",
-        "ntp",
-        "dhcp",
-        "telnet"
-    }
-
-    if protocol in application_protocols:
-        return True
-
-    application_keywords = (
-        "http.",
-        "dns.",
-        "tls.",
-        "ssl.",
-        "smtp.",
-        "ftp.",
-        "ssh.",
-        "smb.",
-        "dcerpc.",
-        "krb5.",
-        "mqtt.",
-        "modbus.",
-        "pgsql.",
-        "rdp.",
-        "snmp.",
-        "sip.",
-        "rfb.",
-        "nfs.",
-        "ike.",
-        "quic.",
-        "file.data",
-        "file_data",
-        "base64_data",
-        "js_data",
-        "vba_data"
-    )
-
-    return any(
-        keyword in lower
-        for keyword in application_keywords
-    )
+    return get_protocol(rule) in APPLICATION_PROTOCOLS
 
 
 def main():
@@ -130,8 +77,8 @@ def main():
             f"  {sys.argv[0]} <ip|transport|application> "
             "<original.rules> <adapted.rules> <output.rules>\n\n"
             "modes:\n"
-            "  ip           original rules related to ipv4, ipv6 or icmp\n"
-            "  transport    original rules related to tcp or udp\n"
+            "  ip           original headers ip, ipv6, icmp, icmpv6 or pkthdr\n"
+            "  transport    original headers tcp, udp, tcp-pkt, tcp-stream or sctp\n"
             "  application  original rules related to application layer"
         )
         return 1

@@ -1,5 +1,5 @@
 Resumo dos intervalos:
-Intervalos extraidos: 78
+Intervalos extraidos: 82
 Intervalos apos merge: 2
 
 Merged:
@@ -22,6 +22,6 @@ Maior indice no payload reajustado: 1177
 
 Resumo das regras:
 Regras analisadas: 1005
-Mantidas sem alteracao (header/independentes do payload): 938
-Adaptadas (offset/depth/distance/within): 67
+Mantidas sem alteracao (header/independentes do payload): 934
+Adaptadas (offset/depth/distance/within): 71
 Excluidas (nao tratadas): 0

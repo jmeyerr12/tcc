@@ -1,13 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "${1:-transport}" == application ]]; then
-    echo "conjunto application fora do escopo experimental atual; consulte application-rules/README.md" >&2
-    exit 2
-fi
-
 if [[ "${EUID}" -ne 0 ]]; then
-    echo "execute como root: sudo $0 {transport|ip} TAXA_MBPS [DURACAO_S] [GERADORES] [THREADS_IDS|auto]" >&2
+    echo "execute como root: sudo $0 {application|transport|ip} TAXA_MBPS [DURACAO_S] [GERADORES] [THREADS_IDS|auto]" >&2
     exit 1
 fi
 
@@ -18,6 +13,8 @@ GENERATORS="${4:-1}"
 IDS_THREADS="${5:-${IDS_THREADS:-auto}}"
 IDS_CPUS="${IDS_CPUS:-auto}"
 REPLAY_CPUS="${REPLAY_CPUS:-auto}"
+TARGET_PPS="${TARGET_PPS:-}"
+PPS_MULTI="${PPS_MULTI:-1}"
 MODE="${EXPERIMENT_MODE:-baseline}"
 TX_IF="${TX_IF:-tcc-tx}"
 IDS_IF="${IDS_IF:-tcc-ids}"
@@ -25,18 +22,34 @@ IDS_IF="${IDS_IF:-tcc-ids}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 PCAP="${PCAP:-${SCRIPT_DIR}/pcaps/CICIDS2017-Monday-mtu1500.pcap}"
+source "${SCRIPT_DIR}/replay_rate.sh"
 
 case "${MODE}:${RULESET}" in
+    baseline:application)
+        RULES="${PROJECT_DIR}/application-rules/original-application.rules"
+        ;;
     baseline:transport)
         RULES="${PROJECT_DIR}/transport-rules/original-tcp-udp.rules"
         ;;
     baseline:ip)
         RULES="${PROJECT_DIR}/ip-rules/original-ip.rules"
         ;;
+    cutter:application)
+        RULES="${PROJECT_DIR}/application-rules/original-application-adapted.rules"
+        ;;
     cutter:transport)
         RULES="${PROJECT_DIR}/transport-rules/original-tcp-udp-adapted.rules"
         ;;
     cutter:ip)
+        RULES="${PROJECT_DIR}/ip-rules/original-ip-adapted.rules"
+        ;;
+    precut:application)
+        RULES="${PROJECT_DIR}/application-rules/original-application-adapted.rules"
+        ;;
+    precut:transport)
+        RULES="${PROJECT_DIR}/transport-rules/original-tcp-udp-adapted.rules"
+        ;;
+    precut:ip)
         RULES="${PROJECT_DIR}/ip-rules/original-ip-adapted.rules"
         ;;
     *)
@@ -53,6 +66,14 @@ for value in "${RATE_MBPS}" "${DURATION_S}"; do
 done
 if [[ ! "${GENERATORS}" =~ ^[1-9][0-9]*$ ]]; then
     echo "o numero de geradores deve ser um inteiro positivo" >&2
+    exit 2
+fi
+if [[ -n "${TARGET_PPS}" && ! "${TARGET_PPS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "TARGET_PPS deve ser um inteiro positivo" >&2
+    exit 2
+fi
+if [[ ! "${PPS_MULTI}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "PPS_MULTI deve ser um inteiro positivo" >&2
     exit 2
 fi
 if [[ "${IDS_THREADS}" != auto && ! "${IDS_THREADS}" =~ ^[1-9][0-9]*$ ]]; then
@@ -102,8 +123,8 @@ if pgrep -x suricata >/dev/null; then
 fi
 
 case "${MODE}" in
-    baseline)
-        # Garante explicitamente que este ensaio e o baseline sem cortador.
+    baseline|precut)
+        # O baseline e o PCAP previamente cortado rodam sem XDP.
         ip link set dev "${TX_IF}" xdp off
         ip link set dev "${IDS_IF}" xdp off
         ;;
@@ -209,14 +230,24 @@ fi
 
 sleep 1
 RATE_PER_GENERATOR="$(awk -v rate="${RATE_MBPS}" -v generators="${GENERATORS}" 'BEGIN { printf "%.6f", rate / generators }')"
+TARGET_PPS_BY_GENERATOR=()
+if [[ -n "${TARGET_PPS}" ]]; then
+    read -r -a TARGET_PPS_BY_GENERATOR <<<"$(split_target_pps "${TARGET_PPS}" "${GENERATORS}")"
+fi
 for ((generator = 1; generator <= GENERATORS; ++generator)); do
     REPLAY_CMD=(tcpreplay \
         --intf1="${TX_IF}" \
         --preload-pcap \
         --loop=0 \
-        --duration="${DURATION_S}" \
-        --mbps="${RATE_PER_GENERATOR}" \
-        "${PCAP}")
+        --duration="${DURATION_S}")
+    if [[ -n "${TARGET_PPS}" ]]; then
+        REPLAY_CMD+=(
+            --pps="${TARGET_PPS_BY_GENERATOR[generator - 1]}"
+            --pps-multi="${PPS_MULTI}")
+    else
+        REPLAY_CMD+=(--mbps="${RATE_PER_GENERATOR}")
+    fi
+    REPLAY_CMD+=("${PCAP}")
     if [[ "${REPLAY_CPUS}" != auto ]]; then
         REPLAY_CMD=(taskset --cpu-list "${REPLAY_CPU_LIST[generator - 1]}" "${REPLAY_CMD[@]}")
     fi
@@ -296,13 +327,19 @@ ACTUAL_MBPS="$(awk '/^Rated:/ { for (i = 1; i <= NF; ++i) if ($i ~ /^Mbps/) sum 
 ACTUAL_PPS="$(awk '/^Rated:/ && /pps/ { sum += $(NF-1) } END { printf "%.2f\n", sum }' "${RESULT_DIR}"/tcpreplay-*.log)"
 ACTUAL_DURATION_S="$(awk '/^Actual:/ { if ($8 > maximum) maximum = $8 } END { printf "%.2f\n", maximum }' "${RESULT_DIR}"/tcpreplay-*.log)"
 TARGET_ACHIEVEMENT_PERCENT="$(awk -v actual="${ACTUAL_MBPS}" -v target="${RATE_MBPS}" 'BEGIN { printf "%.4f", target == 0 ? 0 : 100 * actual / target }')"
+if [[ -n "${TARGET_PPS}" ]]; then
+    PPS_TARGET_ACHIEVEMENT_PERCENT="$(awk -v actual="${ACTUAL_PPS}" -v target="${TARGET_PPS}" 'BEGIN { printf "%.4f", 100 * actual / target }')"
+    RECORDED_TARGET_PPS="${TARGET_PPS}"
+else
+    PPS_TARGET_ACHIEVEMENT_PERCENT="0.0000"
+    RECORDED_TARGET_PPS="0"
+fi
 ENOBUFS_RETRIES="$(awk '/Retried packets \(ENOBUFS\):/ { sum += $NF } END { print sum + 0 }' "${RESULT_DIR}"/tcpreplay-*.log)"
 TX_DROPPED_DELTA="$((TX_DROPPED_AFTER - TX_DROPPED_BEFORE))"
 IDS_PACKETS="$(final_suricata_counter decoder.pkts)"
 IDS_BYTES="$(final_suricata_counter decoder.bytes)"
 KERNEL_PACKETS="$(final_suricata_counter capture.kernel_packets)"
 KERNEL_DROPS="$(final_suricata_counter capture.kernel_drops)"
-INVALID_CHECKSUMS="$(final_suricata_counter tcp.invalid_checksum)"
 END_TO_END_LOSS_PERCENT="$(awk -v sent="${SENT_PACKETS}" -v ids="${IDS_PACKETS}" 'BEGIN { printf "%.6f", sent == 0 ? 0 : 100 * (sent - ids) / sent }')"
 CAPTURE_LOSS_PERCENT="$(awk -v captured="${KERNEL_PACKETS}" -v dropped="${KERNEL_DROPS}" 'BEGIN { printf "%.6f", captured == 0 ? 0 : 100 * dropped / captured }')"
 IDS_MBPS="$(awk -v offered="${ACTUAL_MBPS}" -v sent="${SENT_BYTES}" -v ids="${IDS_BYTES}" 'BEGIN { printf "%.2f", sent == 0 ? 0 : offered * ids / sent }')"
@@ -310,16 +347,17 @@ IDS_PPS="$(awk -v offered="${ACTUAL_PPS}" -v sent="${SENT_PACKETS}" -v ids="${ID
 IDS_BYTE_REDUCTION_PERCENT="$(awk -v sent="${SENT_BYTES}" -v ids="${IDS_BYTES}" 'BEGIN { printf "%.6f", sent == 0 ? 0 : 100 * (sent - ids) / sent }')"
 
 {
-    printf 'mode\truleset\ttarget_mbps\tactual_mbps\ttarget_achievement_percent\tactual_pps\tids_mbps\tids_pps\tids_byte_reduction_percent\trequested_duration_s\tactual_duration_s\tgenerators\tids_threads\tids_cpus\treplay_cpus\ttcpreplay_enobufs\tinterface_tx_dropped\tsent_packets\tsent_bytes\tids_packets\tids_bytes\tkernel_packets\tkernel_drops\tinvalid_checksums\tcapture_loss_percent\tend_to_end_loss_percent\n'
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf 'mode\truleset\ttarget_mbps\tactual_mbps\ttarget_achievement_percent\tactual_pps\tids_mbps\tids_pps\tids_byte_reduction_percent\trequested_duration_s\tactual_duration_s\tgenerators\tids_threads\tids_cpus\treplay_cpus\ttcpreplay_enobufs\tinterface_tx_dropped\tsent_packets\tsent_bytes\tids_packets\tids_bytes\tkernel_packets\tkernel_drops\tcapture_loss_percent\tend_to_end_loss_percent\ttarget_pps\tpps_target_achievement_percent\tpps_multi\n'
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "${MODE}" "${RULESET}" "${RATE_MBPS}" "${ACTUAL_MBPS}" "${TARGET_ACHIEVEMENT_PERCENT}" \
         "${ACTUAL_PPS}" "${IDS_MBPS}" "${IDS_PPS}" \
         "${IDS_BYTE_REDUCTION_PERCENT}" "${DURATION_S}" "${ACTUAL_DURATION_S}" "${GENERATORS}" "${IDS_THREADS}" \
         "${IDS_CPUS}" "${REPLAY_CPUS}" \
         "${ENOBUFS_RETRIES}" "${TX_DROPPED_DELTA}" \
         "${SENT_PACKETS}" "${SENT_BYTES}" "${IDS_PACKETS}" "${IDS_BYTES}" \
-        "${KERNEL_PACKETS}" "${KERNEL_DROPS}" "${INVALID_CHECKSUMS}" \
-        "${CAPTURE_LOSS_PERCENT}" "${END_TO_END_LOSS_PERCENT}"
+        "${KERNEL_PACKETS}" "${KERNEL_DROPS}" \
+        "${CAPTURE_LOSS_PERCENT}" "${END_TO_END_LOSS_PERCENT}" \
+        "${RECORDED_TARGET_PPS}" "${PPS_TARGET_ACHIEVEMENT_PERCENT}" "${PPS_MULTI}"
 } >"${RESULT_DIR}/summary.tsv"
 
 echo "resultado: ${RESULT_DIR}"
