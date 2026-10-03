@@ -30,7 +30,6 @@ ficam em `analisador/`; `make -C analisador` compila somente nessa pasta.
 | `application-rules/`, `transport-rules/`, `ip-rules/` | Regras originais, adaptadas e intervalos de cada grupo |
 | `af_xdp_kern.c`, `xdp/`, `run_intervals.py` | Cortador BPF e configuração dos intervalos |
 | `experiments/pcaps/`, `experiments/results/` | Capturas e resultados locais, fora do Git |
-| `archive/` | Material histórico e referências para consulta |
 
 `make rule-groups` regenera os três conjuntos a partir de `suricata.rules`.
 Inclui todas as regras aceitas, mesmo as mantidas sem alteração. A base atual
