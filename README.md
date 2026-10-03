@@ -35,7 +35,3 @@ ficam em `analisador/`; `make -C analisador` compila somente nessa pasta.
 Inclui todas as regras aceitas, mesmo as mantidas sem alteração. A base atual
 tem 1.535 aceitas: 4 de aplicação, 1.005 de transporte e 526 de rede/IP.
 Ao mudar as regras ou os intervalos, regenere os PCAPs e repita as medições.
-
-Os próximos passos são compartilhar os artefatos com o professor e o Herbele,
-validar o uso no Snort e avançar na escrita: algoritmo, metodologia, resultados
-e limitações. Repositório: <https://github.com/jmeyerr12/tcc>.
